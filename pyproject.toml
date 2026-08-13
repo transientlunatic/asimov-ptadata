@@ -1,0 +1,75 @@
+[build-system]
+requires = [
+    "setuptools>=61.0",
+    "setuptools_scm[toml]>=3.4.3",
+    "wheel",
+]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+version_scheme = "release-branch-semver"
+local_scheme = "no-local-version"
+
+[project]
+name = "asimov-ptadata"
+dynamic = ["version"]
+authors = [
+    { name = "Daniel Williams", email = "daniel.williams@ligo.org" },
+]
+description = "Pulsar timing array data acquisition and reduction, with an Asimov pipeline plugin"
+readme = "README.md"
+license = { file = "LICENSE" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Natural Language :: English",
+]
+requires-python = ">=3.9"
+dependencies = [
+    "pint-pulsar",
+    "numpy",
+    "astropy",
+    "pyyaml",
+    "click",
+]
+
+[project.optional-dependencies]
+asimov = [
+    "asimov>=0.7",
+]
+docs = [
+    "sphinx",
+    "kentigern >= 0.3.0",
+    "numpydoc",
+]
+test = [
+    "pytest>=7.0.0",
+    "pytest-cov",
+]
+
+[project.scripts]
+ptadata = "asimov_ptadata.cli:main"
+
+[project.entry-points."asimov.pipelines"]
+ptadata = "asimov_ptadata:Pipeline"
+
+[project.urls]
+"Source code" = "https://github.com/transientlunatic/asimov-ptadata"
+
+[tool.setuptools]
+packages = ["asimov_ptadata"]
+
+[tool.setuptools.package-data]
+asimov_ptadata = ["settings_template.yml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "--cov=asimov_ptadata --cov-report=html --cov-report=term"

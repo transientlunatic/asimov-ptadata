@@ -1,0 +1,24 @@
+#; ------------------------------------------
+#; {{ production.name }}
+#; ------------------------------------------
+#; ptadata configuration file created by asimov
+#; for {{ production.event.name }}.
+#;
+
+pulsar: {{ production.event.name }}
+rundir: {{ production.rundir }}
+release:
+{%- if production.meta['data'] contains 'release name' %}
+  name: {{ production.meta['data']['release name'] }}
+{%- else %}
+  root: {{ production.meta['data']['release root'] }}
+{%- endif %}
+{%- if production.meta['data'] contains 'ephemeris' %}
+ephemeris: {{ production.meta['data']['ephemeris'] }}
+{%- endif %}
+{%- if production.meta['data'] contains 'bipm version' %}
+bipm version: {{ production.meta['data']['bipm version'] }}
+{%- endif %}
+reduction:
+  sigma threshold: {{ production.meta['reduction']['sigma threshold'] | default: 5.0 }}
+  refit: {{ production.meta['reduction']['refit'] | default: true }}
