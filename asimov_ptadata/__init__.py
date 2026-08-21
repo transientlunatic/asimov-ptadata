@@ -1,6 +1,16 @@
 """Pulsar timing array data acquisition and reduction, with an Asimov pipeline plugin."""
 
-__all__ = ["Pipeline"]
+import importlib.util
+
+# Only advertise Pipeline when the 'asimov' extra is actually installed -
+# otherwise `from asimov_ptadata import *` would try to resolve it via
+# __getattr__ below and hit the AttributeError it deliberately raises,
+# where previously (before Pipeline's export became lazy) it was just
+# absent from __all__. find_spec() only checks whether the top-level
+# 'asimov' package is importable; it doesn't import asimov_ptadata.pipeline
+# itself, so it can't reintroduce the circular-import this laziness exists
+# to avoid.
+__all__ = ["Pipeline"] if importlib.util.find_spec("asimov") is not None else []
 
 
 def __getattr__(name):
@@ -29,11 +39,15 @@ def __getattr__(name):
     if name == "Pipeline":
         try:
             from .pipeline import Pipeline
-        except ImportError as exc:
-            # asimov isn't installed - the ptadata CLI (fetch/reduce) still
-            # works standalone, it just doesn't expose the asimov plugin
-            # class. Match normal attribute-access failure semantics rather
-            # than propagating the ImportError.
+        except ModuleNotFoundError as exc:
+            # Only treat this as "the optional extra isn't installed" if
+            # 'asimov' itself is the missing module - a broad `except
+            # ImportError` here would also swallow a real bug inside
+            # .pipeline (a missing/renamed sub-dependency, a bad relative
+            # import, ...) and misreport it as an absent extra, which is
+            # much harder to diagnose than letting it propagate normally.
+            if exc.name != "asimov":
+                raise
             raise AttributeError(
                 "asimov_ptadata.Pipeline requires the 'asimov' extra "
                 "(pip install asimov-ptadata[asimov])"
