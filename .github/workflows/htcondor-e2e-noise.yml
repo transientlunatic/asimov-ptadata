@@ -50,6 +50,22 @@ jobs:
         run: |
           yum install -y sudo git
 
+      - name: Install SuiteSparse development headers
+        # scikit-sparse (an enterprise-pulsar dependency) fatal-errors on
+        # cholmod.h if these aren't present - confirmed the hard way on this
+        # workflow's second live run: pre-installing scikit-sparse itself
+        # via conda-forge (conda/noise-packages.txt) still wasn't enough to
+        # stop pip from attempting its own source build of it while
+        # resolving enterprise-pulsar's dependencies, and that source build
+        # is what actually needs these headers - its compile command already
+        # searches the standard `-I/usr/include/suitesparse` path, so
+        # installing the real dev package there (rather than fighting
+        # pip/conda metadata interop) is the direct fix. suitesparse-devel
+        # lives in EPEL on this RHEL-family image, not the base repos.
+        run: |
+          yum install -y epel-release
+          yum install -y suitesparse-devel
+
       - name: Create submit user
         uses: etive-io/asimov/.github/actions/create-submit-user@main
 
@@ -61,15 +77,7 @@ jobs:
         uses: etive-io/asimov/.github/actions/setup-asimov-env@main
         with:
           python-version: "3.10"
-          # enterprise-pulsar pulls in scikit-sparse, which needs SuiteSparse's
-          # cholmod.h to build its C extension - not present as a dev header in
-          # the htcondor/mini (yum/RHEL-based) container, so a plain pip install
-          # fails with "fatal error: cholmod.h: No such file or directory"
-          # (confirmed the hard way on this workflow's first live run).
-          # conda-forge ships scikit-sparse as a pre-built binary with
-          # SuiteSparse bundled, so install it via conda first - pip then finds
-          # it already satisfied when it resolves enterprise-pulsar's deps.
-          conda-packages: "conda/noise-packages.txt"
+          conda-packages: ""
           # asimov itself, plus the "noise" extra's real dependencies
           # (enterprise-pulsar, ptmcmcsampler) - both installed cleanly from
           # PyPI with no native-build issues (beyond scikit-sparse, handled
