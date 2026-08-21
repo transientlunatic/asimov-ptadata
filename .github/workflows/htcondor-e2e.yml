@@ -134,13 +134,24 @@ jobs:
         # core's own setup-asimov-env action does it internally (via the
         # active interpreter's sys.prefix, from inside the activated "asimov"
         # env) instead of assuming a fixed path.
+        #
+        # The `\$`s below are deliberate, not a typo: run-asimov-command
+        # pipes this script into `su - submituser <<SUBMITUSER ... SUBMITUSER`
+        # with an *unquoted* heredoc delimiter, so bash expands any bare
+        # `$(...)`/`$VAR` in it immediately, in the outer (root, pre
+        # `conda activate`) shell - not inside the activated env as it looks.
+        # Confirmed the hard way: an unescaped `$(python3 ...)` here silently
+        # resolved to "" (the outer shell's python3, not the conda env's) and
+        # produced a job held again, but on `bin/ptadata not found`. Escaping
+        # defers expansion to the inner shell that actually runs after
+        # `conda activate asimov`, where it's meant to happen.
         uses: etive-io/asimov/.github/actions/run-asimov-command@main
         with:
           script: |
-            ENV_PREFIX=$(python3 -c 'import sys; print(sys.prefix)')
-            echo "Resolved asimov conda env prefix: $ENV_PREFIX"
-            test -x "$ENV_PREFIX/bin/ptadata" || { echo "::error::$ENV_PREFIX/bin/ptadata not found or not executable"; exit 1; }
-            asimov configuration update pipelines/environment "$ENV_PREFIX"
+            ENV_PREFIX=\$(python3 -c 'import sys; print(sys.prefix)')
+            echo "Resolved asimov conda env prefix: \$ENV_PREFIX"
+            test -x "\$ENV_PREFIX/bin/ptadata" || { echo "::error::\$ENV_PREFIX/bin/ptadata not found or not executable"; exit 1; }
+            asimov configuration update pipelines/environment "\$ENV_PREFIX"
 
       - name: Add test event
         uses: etive-io/asimov/.github/actions/run-asimov-command@main
