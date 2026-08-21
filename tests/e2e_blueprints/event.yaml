@@ -1,0 +1,9 @@
+# Minimal event blueprint for the HTCondor end-to-end test.
+#
+# asimov core's Event.from_yaml only hard-requires "name" - none of the
+# gravitational-wave-specific fields (interferometers, likelihood, priors)
+# are needed for a ptadata production, even though every analysis is
+# internally instantiated as a GravitationalWaveTransient regardless of its
+# "pipeline:" value (see asimov.event.Production = GravitationalWaveTransient).
+kind: event
+name: 1748-2021E

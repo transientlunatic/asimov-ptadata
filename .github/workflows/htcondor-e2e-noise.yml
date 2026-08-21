@@ -1,0 +1,338 @@
+name: HTCondor End-to-End Test (noise-fit)
+
+# Extends htcondor-e2e.yml's pattern (reduce -> QC -> real HTCondor
+# completion) one stage further: reduce -> automated QC/review approval ->
+# a real ptadata-noise ProjectAnalysis (single-pulsar enterprise + PINT +
+# PTMCMCSampler noise fit), gated on the reduce stage's review status via
+# asimov's real review/dependency machinery, submitted through the real
+# scheduler API, and run to completion on real HTCondor.
+#
+# Kept as its own workflow file rather than extending htcondor-e2e.yml
+# in place, since it needs the heavier "noise" optional-dependency group
+# (enterprise-pulsar, ptmcmcsampler) that plain `ptadata reduce` users
+# shouldn't have to install, and because splitting it out keeps the fast
+# reduce-only e2e test fast and independently diagnosable if this one goes
+# red.
+#
+# Caution for anyone touching this file: run-asimov-command pipes its
+# `script:` into an *unquoted* `su - submituser <<SUBMITUSER ... SUBMITUSER`
+# heredoc. Any `$(...)`/`$VAR` meant to be evaluated *after* `conda activate
+# asimov` (inside the activated env) must be escaped as `\$(...)`/`\$VAR`,
+# or it silently evaluates in the wrong (outer, root, pre-activation) shell
+# instead - this cost two debugging rounds on the reduce-only e2e workflow.
+# Plain CI-provided values like $GITHUB_WORKSPACE are fine unescaped (same
+# value either way); anything that depends on the activated conda env
+# (e.g. resolving the env's own `python3`/`sys.prefix`) is not.
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  htcondor-e2e-noise:
+    name: "ptadata-noise via asimov on HTCondor"
+    runs-on: ubuntu-latest
+    container:
+      image: htcondor/mini:latest
+      options: --privileged
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: etive-io/asimov/.github/actions/setup-htcondor@main
+
+      - name: Install base tools
+        run: |
+          yum install -y sudo git
+
+      - name: Install SuiteSparse development headers
+        # scikit-sparse (an enterprise-pulsar dependency) fatal-errors on
+        # cholmod.h if these aren't present - confirmed the hard way on this
+        # workflow's second live run: pre-installing scikit-sparse itself
+        # via conda-forge (conda/noise-packages.txt) still wasn't enough to
+        # stop pip from attempting its own source build of it while
+        # resolving enterprise-pulsar's dependencies, and that source build
+        # is what actually needs these headers - its compile command already
+        # searches the standard `-I/usr/include/suitesparse` path, so
+        # installing the real dev package there (rather than fighting
+        # pip/conda metadata interop) is the direct fix. suitesparse-devel
+        # lives in EPEL on this RHEL-family image, not the base repos.
+        run: |
+          yum install -y epel-release
+          yum install -y suitesparse-devel
+
+      - name: Create submit user
+        uses: etive-io/asimov/.github/actions/create-submit-user@main
+
+      - name: Ensure submituser can access workspace
+        run: |
+          chmod -R a+rwX "$GITHUB_WORKSPACE"
+
+      - name: Setup Asimov Environment
+        uses: etive-io/asimov/.github/actions/setup-asimov-env@main
+        with:
+          python-version: "3.10"
+          conda-packages: ""
+          # asimov itself, plus the "noise" extra's real dependencies
+          # (enterprise-pulsar, ptmcmcsampler) - both installed cleanly from
+          # PyPI with no native-build issues (beyond scikit-sparse, handled
+          # above) when this pipeline was built.
+          # enterprise_extensions is deliberately not installed: the noise
+          # model is built directly from enterprise.signals building blocks
+          # (see asimov_ptadata/noise_fit.py), avoiding its
+          # healpy/scikit-learn dependency chain for a model that doesn't
+          # need it.
+          extra-packages: "asimov>=0.7 enterprise-pulsar ptmcmcsampler"
+
+      - name: Set up git
+        run: |
+          su - submituser <<SUBMITUSER
+          set -euo pipefail
+          git config --global init.defaultBranch master
+          git config --global user.email "you@example.com"
+          git config --global user.name "Your Name"
+          SUBMITUSER
+
+      - name: Stage fixture pulsar data
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          # A fast, network-free par/tim pair for a fake pulsar
+          # ("1748-2021E") - PINT's own bundled NGC6440E example files,
+          # copied and renamed. Same trick htcondor-e2e.yml and this repo's
+          # own tests use, so this end-to-end run doesn't depend on
+          # reaching a real PTA data release. (Building the enterprise PTA
+          # in the noise-fit stage below *does* still need PINT's own
+          # normal solar-system-ephemeris download - the same real network
+          # dependency the reduce stage's PINT fit already has; unlike that
+          # dependency, this fixture-staging step has no need for it.)
+          script: |
+            python3 << 'PYEOF'
+            import pathlib
+            import shutil
+
+            import pint.config
+
+            psr_dir = pathlib.Path("tests/fixtures/release/1748-2021E")
+            psr_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy(pint.config.examplefile("NGC6440E.par"), psr_dir / "1748-2021E.par")
+            shutil.copy(pint.config.examplefile("NGC6440E.tim"), psr_dir / "1748-2021E.tim")
+            print(f"Staged fixture pulsar data in {psr_dir.resolve()}")
+            PYEOF
+
+      - name: Write analysis blueprints
+        run: |
+          mkdir -p tests/e2e_blueprints
+          cat > tests/e2e_blueprints/reduce-analysis.yaml <<EOF
+          kind: analysis
+          name: reduce
+          pipeline: ptadata
+          status: ready
+          data:
+            release root: $GITHUB_WORKSPACE/tests/fixtures/release
+          reduction:
+            sigma threshold: 5.0
+            refit: true
+          EOF
+          cat > tests/e2e_blueprints/noise-analysis.yaml <<'EOF'
+          kind: projectanalysis
+          name: noise-fit
+          pipeline: ptadata-noise
+          subjects:
+            - 1748-2021E
+          # AND-group smart dependency: only a "ptadata" reduce production
+          # whose review.status is "approved" resolves here - exactly what
+          # asimov_ptadata.pipeline.Pipeline.after_completion() sets
+          # automatically once "asimov monitor" notices the reduce job
+          # finished with a passing QC report. See asimov_ptadata/noise.py's
+          # module docstring for why this has to be the nested-list
+          # AND-group form rather than a single {pipeline: ..., review: ...}
+          # dict.
+          analyses:
+            - - "pipeline: ptadata"
+              - "review: approved"
+          status: ready
+          # Small but real: this is a genuine PTMCMCSampler run (not a
+          # stub), just a short one so this stays fast in CI.
+          sampler:
+            niter: 800
+            burn: 200
+            red noise components: 5
+          EOF
+          chmod a+rwX tests/e2e_blueprints/reduce-analysis.yaml tests/e2e_blueprints/noise-analysis.yaml
+          cat tests/e2e_blueprints/reduce-analysis.yaml
+          cat tests/e2e_blueprints/noise-analysis.yaml
+
+      - name: Create asimov project
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov init "Test Project"
+
+      - name: Configure asimov user
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov configuration update condor/user submituser
+
+      - name: Configure HTCondor settings
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: |
+            asimov configuration update condor/cache_time 30
+            asimov configuration update condor/cron_minute '*/1'
+
+      - name: Point pipelines/environment at the asimov conda env
+        # See htcondor-e2e.yml for the full story on why this is resolved
+        # dynamically (rather than a hardcoded path) and why the `\$`s
+        # below are deliberate - confirmed the hard way there already, not
+        # re-litigated here.
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: |
+            ENV_PREFIX=\$(python3 -c 'import sys; print(sys.prefix)')
+            echo "Resolved asimov conda env prefix: \$ENV_PREFIX"
+            test -x "\$ENV_PREFIX/bin/ptadata" || { echo "::error::\$ENV_PREFIX/bin/ptadata not found or not executable"; exit 1; }
+            asimov configuration update pipelines/environment "\$ENV_PREFIX"
+
+      - name: Add test event
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov apply -f "$GITHUB_WORKSPACE/tests/e2e_blueprints/event.yaml"
+
+      - name: Add ptadata reduce analysis
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov apply -f "$GITHUB_WORKSPACE/tests/e2e_blueprints/reduce-analysis.yaml" -e 1748-2021E
+
+      - name: Build and submit ptadata reduce job
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov manage build submit
+
+      - name: Wait for ptadata reduce completion
+        uses: etive-io/asimov/.github/actions/wait-for-files@main
+        with:
+          patterns: "qc_report.yml"
+          directory: "working/1748-2021E/reduce/reduced"
+          timeout: "300"
+          interval: "10"
+          working-directory: .
+
+      - name: Run asimov monitor (detects reduce completion, auto-approves review)
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov monitor
+
+      - name: Verify the reduce production was auto-approved
+        # Confirms the real review-gating machinery this PR adds
+        # (asimov_ptadata.pipeline.Pipeline.after_completion ->
+        # production.review.add(ReviewMessage(..., status="APPROVED"))) -
+        # not just that the noise-fit stage happens to run, but that it
+        # only *can* run because this specifically succeeded.
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: |
+            python3 << 'PYEOF'
+            import sys
+            from asimov.ledger import YAMLLedger
+
+            ledger = YAMLLedger(".asimov/ledger.yml")
+            event = ledger.get_event("1748-2021E")[0]
+            reduce = [p for p in event.productions if p.name == "reduce"][0]
+
+            print(f"reduce status: {reduce.status}")
+            print(f"reduce review status: {reduce.review.status}")
+            if reduce.review.status != "APPROVED":
+                print("FAIL: reduce production was not auto-approved")
+                sys.exit(1)
+            print("OK: reduce production auto-approved via QC pass")
+            PYEOF
+
+      - name: Add ptadata-noise project analysis
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov apply -f "$GITHUB_WORKSPACE/tests/e2e_blueprints/noise-analysis.yaml"
+
+      - name: Build and submit noise-fit job
+        # Picks up both the (already-uploaded, so skipped) reduce production
+        # and the newly-added noise-fit project analysis; NoisePipeline.
+        # build_dag() resolves the review-approved reduce production's
+        # par/tim assets and writes the settings file the submitted
+        # `ptadata noise-run` job reads.
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov manage build submit
+
+      - name: Wait for noise-fit completion
+        uses: etive-io/asimov/.github/actions/wait-for-files@main
+        with:
+          patterns: "noise_report.yml"
+          directory: "working/project-analyses/1748-2021E/noise-fit/noise/1748-2021E"
+          timeout: "300"
+          interval: "10"
+          working-directory: .
+
+      - name: Run asimov monitor (detects noise-fit completion)
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov monitor
+
+      - name: Write verification script
+        run: |
+          cat > /tmp/verify_noise.py <<'EOF'
+          import sys
+          from asimov.monitor_api import get_analysis_status
+
+          # Neither pipeline has a downstream stage to promote it to
+          # "complete", so both terminate at "uploaded" - matching
+          # htcondor-e2e.yml's own acceptance criteria for the reduce stage.
+          ACCEPTED = {"complete", "uploaded"}
+
+          statuses = get_analysis_status()
+          print("Final analysis statuses:")
+          failures = []
+          for name, status in statuses.items():
+              print(f"  {name}: {status}")
+              if str(status).lower() not in ACCEPTED:
+                  failures.append(f"{name}: {status}")
+          if failures:
+              print(f"\nFAIL: {len(failures)} analyses not complete/uploaded:")
+              for f in failures:
+                  print(f"  - {f}")
+              sys.exit(1)
+          print(f"\nAll {len(statuses)} analyses reached a successful terminal state!")
+          EOF
+          chmod 644 /tmp/verify_noise.py
+
+      - name: Verify noise-fit analysis completed
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: python3 /tmp/verify_noise.py
+
+      - name: Report the noise-fit result
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: |
+            python3 << 'PYEOF'
+            import yaml
+
+            with open("working/project-analyses/1748-2021E/noise-fit/noise/1748-2021E/noise_report.yml") as f:
+                report = yaml.safe_load(f)
+            print("Noise-fit report:")
+            print(yaml.safe_dump(report, sort_keys=False))
+            PYEOF
+
+      - name: Archive artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: htcondor-e2e-noise-debug
+          path: |
+            .asimov/
+            working/
+            checkouts/
+            tests/fixtures/
+          retention-days: 5

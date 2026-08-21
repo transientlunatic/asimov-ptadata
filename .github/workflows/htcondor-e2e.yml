@@ -1,0 +1,229 @@
+name: HTCondor End-to-End Test
+
+# Runs the ptadata Asimov pipeline plugin through a real asimov project on
+# real HTCondor (inside the htcondor/mini container asimov core's own CI
+# uses), rather than mocking the scheduler. This is heavier than the plain
+# unit-test workflow (tests.yml) - a container, a submit user, a conda env -
+# but ptadata's own reduction job is a single quick PINT run against a
+# synthetic fixture pulsar, not a real bilby/bayeswave analysis, so it stays
+# fast. Kept on [push, pull_request] (rather than workflow_dispatch-only, the
+# way asimov core's own multi-pipeline htcondor-tests.yml is) so it acts as
+# a real CI gate on this plugin, mirroring asimov core's
+# testing-pipelines.yml pattern for its own lightweight test pipelines.
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  htcondor-e2e:
+    name: "ptadata via asimov on HTCondor"
+    runs-on: ubuntu-latest
+    container:
+      image: htcondor/mini:latest
+      options: --privileged
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: etive-io/asimov/.github/actions/setup-htcondor@main
+
+      - name: Install base tools
+        run: |
+          yum install -y sudo git
+
+      - name: Create submit user
+        uses: etive-io/asimov/.github/actions/create-submit-user@main
+
+      - name: Ensure submituser can access workspace
+        run: |
+          chmod -R a+rwX "$GITHUB_WORKSPACE"
+
+      - name: Setup Asimov Environment
+        uses: etive-io/asimov/.github/actions/setup-asimov-env@main
+        with:
+          python-version: "3.10"
+          conda-packages: ""
+          # asimov itself is only an optional ("asimov") extra of
+          # asimov-ptadata, not a base dependency, so it has to be installed
+          # explicitly here. The composite action's own "pip install
+          # --force-reinstall ." step (run against this checkout) then
+          # installs asimov-ptadata itself - including its base deps
+          # (pint-pulsar et al.) - and registers the "ptadata" entry in
+          # asimov's "asimov.pipelines" group.
+          extra-packages: "asimov>=0.7"
+
+      - name: Set up git
+        run: |
+          su - submituser <<SUBMITUSER
+          set -euo pipefail
+          git config --global init.defaultBranch master
+          git config --global user.email "you@example.com"
+          git config --global user.name "Your Name"
+          SUBMITUSER
+
+      - name: Stage fixture pulsar data
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          # A fast, network-free par/tim pair for a fake pulsar
+          # ("1748-2021E") - PINT's own bundled NGC6440E example files,
+          # copied and renamed. Same trick tests/test_cli.py and
+          # tests/test_pipeline.py use, so this end-to-end run doesn't
+          # depend on reaching a real PTA data release.
+          script: |
+            python3 << 'PYEOF'
+            import pathlib
+            import shutil
+
+            import pint.config
+
+            psr_dir = pathlib.Path("tests/fixtures/release/1748-2021E")
+            psr_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy(pint.config.examplefile("NGC6440E.par"), psr_dir / "1748-2021E.par")
+            shutil.copy(pint.config.examplefile("NGC6440E.tim"), psr_dir / "1748-2021E.tim")
+            print(f"Staged fixture pulsar data in {psr_dir.resolve()}")
+            PYEOF
+
+      - name: Write analysis blueprint
+        run: |
+          mkdir -p tests/e2e_blueprints
+          cat > tests/e2e_blueprints/analysis.yaml <<EOF
+          kind: analysis
+          name: reduce
+          pipeline: ptadata
+          status: ready
+          data:
+            release root: $GITHUB_WORKSPACE/tests/fixtures/release
+          reduction:
+            sigma threshold: 5.0
+            refit: true
+          EOF
+          chmod a+rwX tests/e2e_blueprints/analysis.yaml
+          cat tests/e2e_blueprints/analysis.yaml
+
+      - name: Create asimov project
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov init "Test Project"
+
+      - name: Configure asimov user
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov configuration update condor/user submituser
+
+      - name: Configure HTCondor settings
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: |
+            asimov configuration update condor/cache_time 30
+            asimov configuration update condor/cron_minute '*/1'
+
+      - name: Point pipelines/environment at the asimov conda env
+        # This is exactly the path asimov_ptadata.pipeline.Pipeline.build_dag
+        # joins with "bin/ptadata" to find the executable HTCondor submits,
+        # so a wrong value here is a silent job-submission failure (a held
+        # job, "No such file or directory") rather than a loud one - confirmed
+        # the hard way: hardcoding "/usr/share/miniconda/envs/asimov" here
+        # doesn't match where conda-incubator/setup-miniconda actually
+        # installs inside this container. Resolve it the same way asimov
+        # core's own setup-asimov-env action does it internally (via the
+        # active interpreter's sys.prefix, from inside the activated "asimov"
+        # env) instead of assuming a fixed path.
+        #
+        # The `\$`s below are deliberate, not a typo: run-asimov-command
+        # pipes this script into `su - submituser <<SUBMITUSER ... SUBMITUSER`
+        # with an *unquoted* heredoc delimiter, so bash expands any bare
+        # `$(...)`/`$VAR` in it immediately, in the outer (root, pre
+        # `conda activate`) shell - not inside the activated env as it looks.
+        # Confirmed the hard way: an unescaped `$(python3 ...)` here silently
+        # resolved to "" (the outer shell's python3, not the conda env's) and
+        # produced a job held again, but on `bin/ptadata not found`. Escaping
+        # defers expansion to the inner shell that actually runs after
+        # `conda activate asimov`, where it's meant to happen.
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: |
+            ENV_PREFIX=\$(python3 -c 'import sys; print(sys.prefix)')
+            echo "Resolved asimov conda env prefix: \$ENV_PREFIX"
+            test -x "\$ENV_PREFIX/bin/ptadata" || { echo "::error::\$ENV_PREFIX/bin/ptadata not found or not executable"; exit 1; }
+            asimov configuration update pipelines/environment "\$ENV_PREFIX"
+
+      - name: Add test event
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov apply -f "$GITHUB_WORKSPACE/tests/e2e_blueprints/event.yaml"
+
+      - name: Add ptadata analysis
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov apply -f "$GITHUB_WORKSPACE/tests/e2e_blueprints/analysis.yaml" -e 1748-2021E
+
+      - name: Build and submit ptadata job
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov manage build submit
+
+      - name: Wait for ptadata completion
+        uses: etive-io/asimov/.github/actions/wait-for-files@main
+        with:
+          patterns: "qc_report.yml"
+          directory: "working/1748-2021E/reduce/reduced"
+          timeout: "300"
+          interval: "10"
+          working-directory: .
+
+      - name: Run asimov monitor
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov monitor
+
+      - name: Write verification script
+        run: |
+          cat > /tmp/verify_ptadata.py <<'EOF'
+          import sys
+          from asimov.monitor_api import get_analysis_status
+
+          # ptadata's Pipeline.after_completion() sets status to "uploaded"
+          # (there's no downstream analysis to promote it to "complete"),
+          # so both are accepted as a successful terminal state - matching
+          # asimov core's own htcondor-tests.yml programmatic-API check
+          # rather than testing-pipelines.yml's stricter "complete"-only one.
+          ACCEPTED = {"complete", "uploaded"}
+
+          statuses = get_analysis_status()
+          print("Final analysis statuses:")
+          failures = []
+          for name, status in statuses.items():
+              print(f"  {name}: {status}")
+              if str(status).lower() not in ACCEPTED:
+                  failures.append(f"{name}: {status}")
+          if failures:
+              print(f"\nFAIL: {len(failures)} analyses not complete/uploaded:")
+              for f in failures:
+                  print(f"  - {f}")
+              sys.exit(1)
+          print(f"\nAll {len(statuses)} analyses reached a successful terminal state!")
+          EOF
+          chmod 644 /tmp/verify_ptadata.py
+
+      - name: Verify ptadata analysis completed
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: python3 /tmp/verify_ptadata.py
+
+      - name: Archive artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: htcondor-e2e-debug
+          path: |
+            .asimov/
+            working/
+            checkouts/
+            tests/fixtures/
+          retention-days: 5

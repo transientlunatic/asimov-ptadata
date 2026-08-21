@@ -14,6 +14,7 @@ import yaml
 
 import asimov.pipeline
 from asimov import config
+from asimov.review import ReviewMessage
 from asimov.scheduler import JobDescription
 
 
@@ -79,7 +80,78 @@ class Pipeline(asimov.pipeline.Pipeline):
         self.logger.info("ptadata job completion was not detected.")
         return False
 
+    def _reduced_dir(self):
+        return os.path.join(self.production.rundir, "reduced")
+
+    def _read_qc_report(self):
+        """
+        Read this production's ``qc_report.yml``, if it has been produced yet.
+
+        Returns
+        -------
+        dict or None
+            The parsed QC report, or ``None`` if the reduction hasn't
+            written one yet (e.g. the job hasn't completed).
+        """
+        qc_report_path = os.path.join(self._reduced_dir(), "qc_report.yml")
+        if not os.path.exists(qc_report_path):
+            return None
+        with open(qc_report_path) as f:
+            return yaml.safe_load(f)
+
     def after_completion(self):
+        """
+        Runs automatically once the reduction job completes (see
+        ``asimov.monitor_states``).
+
+        As well as the usual status bookkeeping, this is where the QC
+        report's automated verdict is translated into a real asimov review
+        decision (``self.production.review``), rather than the ad hoc
+        ``production.meta["review status"]`` string this used to be limited
+        to. Downstream analyses (e.g. a noise-fit ``ProjectAnalysis``) can
+        then gate on this in their blueprint with a ``review: approved``
+        smart dependency, using asimov's own
+        ``Analysis.matches_filter``/``review.status`` machinery
+        (``asimov/review.py``, ``asimov/analysis.py``) instead of a
+        pipeline-specific convention:
+
+        - ``qc_report.status == "pass"`` -> an ``APPROVED`` review message is
+          added automatically, so the production is immediately usable as a
+          dependency.
+        - ``"needs-review"`` -> no review message is added. ``review.status``
+          is then ``None``, so a ``review: approved`` filter correctly
+          excludes it until a human runs ``asimov review add`` to approve or
+          reject it.
+        - ``"failed"`` -> an explicit ``REJECTED`` review message is added,
+          so the failure is visible in the review history rather than the
+          production merely being silently excluded from downstream
+          dependency resolution.
+        """
+        report = self._read_qc_report()
+        if report is not None:
+            status = report.get("status", "needs-review")
+            if status == "pass":
+                self.production.review.add(
+                    ReviewMessage(
+                        message="Automated QC passed",
+                        production=self.production,
+                        status="APPROVED",
+                    )
+                )
+            elif status == "failed":
+                self.production.review.add(
+                    ReviewMessage(
+                        message=(
+                            "Automated QC failed: "
+                            f"{report.get('ntoas_flagged', '?')}/{report.get('ntoas', '?')} "
+                            "TOAs flagged"
+                        ),
+                        production=self.production,
+                        status="REJECTED",
+                    )
+                )
+            # "needs-review": deliberately left unreviewed - see docstring.
+
         self.production.status = "uploaded"
         self.production.event.update_data()
 
@@ -88,7 +160,7 @@ class Pipeline(asimov.pipeline.Pipeline):
         Collect the assets for this job.
         """
         outputs = {}
-        reduced_dir = os.path.join(self.production.rundir, "reduced")
+        reduced_dir = self._reduced_dir()
         if not os.path.exists(reduced_dir):
             return outputs
 
@@ -107,14 +179,15 @@ class Pipeline(asimov.pipeline.Pipeline):
         if quarantine_files:
             outputs["quarantined toas"] = quarantine_files
 
-        qc_report_path = os.path.join(reduced_dir, "qc_report.yml")
-        if os.path.exists(qc_report_path):
-            with open(qc_report_path) as f:
-                report = yaml.safe_load(f)
+        report = self._read_qc_report()
+        if report is not None:
             outputs["qc report"] = report
 
             data = self.production.event.meta.setdefault("data", {})
             data["ptadata qc"] = report
+            # Kept for backwards compatibility with anything already reading
+            # this ad hoc key; the real review decision now lives on
+            # `self.production.review` (see `after_completion`).
             self.production.meta["review status"] = report.get("status", "needs-review")
 
         return outputs
