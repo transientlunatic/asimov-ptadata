@@ -42,6 +42,19 @@ dependencies = [
 asimov = [
     "asimov>=0.7",
 ]
+noise = [
+    # Needed alongside (not instead of) the "asimov" extra to actually run
+    # the ptadata-noise Asimov pipeline; kept as a separate group so
+    # existing `ptadata reduce` users aren't forced to install this heavier
+    # stack. enterprise_extensions was deliberately left out: the noise
+    # model here is built directly from enterprise.signals building blocks
+    # (see asimov_ptadata/noise_fit.py), which avoids pulling in
+    # enterprise_extensions' healpy/scikit-learn dependency chain for a
+    # single-pulsar white+red-noise model that doesn't need it.
+    "asimov>=0.7",
+    "enterprise-pulsar",
+    "ptmcmcsampler",
+]
 docs = [
     "sphinx",
     "kentigern >= 0.3.0",
@@ -57,6 +70,7 @@ ptadata = "asimov_ptadata.cli:main"
 
 [project.entry-points."asimov.pipelines"]
 ptadata = "asimov_ptadata:Pipeline"
+ptadata-noise = "asimov_ptadata.noise:NoisePipeline"
 
 [project.urls]
 "Source code" = "https://github.com/transientlunatic/asimov-ptadata"
@@ -65,7 +79,7 @@ ptadata = "asimov_ptadata:Pipeline"
 packages = ["asimov_ptadata"]
 
 [tool.setuptools.package-data]
-asimov_ptadata = ["settings_template.yml"]
+asimov_ptadata = ["settings_template.yml", "noise_settings_template.yml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

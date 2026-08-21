@@ -42,6 +42,50 @@ def test_reduce_command(fake_release, tmp_path):
     assert (outdir / "qc_report.yml").exists()
 
 
+def test_noise_fit_command_reports_failure_for_unusable_par(tmp_path):
+    # A hermetic negative-path test: enterprise/PINT fail synchronously while
+    # parsing this timing model (no spindown component), well before ever
+    # needing network access to resolve a solar-system ephemeris - so this
+    # exercises the noise-fit CLI's real failure handling without needing
+    # the network dependency a *successful* fit requires (see
+    # scripts/noise_fit_smoketest.py for that).
+    par = tmp_path / "bad.par"
+    par.write_text("PSR bad\n")
+    tim = tmp_path / "bad.tim"
+    tim.write_text("FORMAT 1\n")
+    outdir = tmp_path / "noise"
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["noise-fit", "--par", str(par), "--tim", str(tim), "--outdir", str(outdir)]
+    )
+    assert result.exit_code == 1
+    report = yaml.safe_load(result.output)
+    assert report["status"] == "failed"
+    assert (outdir / "noise_report.yml").exists()
+
+
+def test_noise_run_command_reports_failure_for_unusable_par(tmp_path):
+    par = tmp_path / "bad.par"
+    par.write_text("PSR bad\n")
+    tim = tmp_path / "bad.tim"
+    tim.write_text("FORMAT 1\n")
+    rundir = tmp_path / "rundir"
+    rundir.mkdir()
+    settings = {
+        "rundir": str(rundir),
+        "subjects": [{"name": "bad", "par": str(par), "tim": [str(tim)]}],
+        "sampler": {"niter": 10, "burn": 2, "red noise components": 2},
+    }
+    settings_file = rundir / "settings.yml"
+    settings_file.write_text(yaml.safe_dump(settings))
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["noise-run", "--settings", str(settings_file)])
+    assert result.exit_code == 1
+    assert (rundir / "noise" / "bad" / "noise_report.yml").exists()
+
+
 def test_run_command(fake_release, tmp_path):
     rundir = tmp_path / "rundir"
     rundir.mkdir()

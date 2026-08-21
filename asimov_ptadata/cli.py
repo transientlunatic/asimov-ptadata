@@ -1,11 +1,13 @@
 """Command-line interface for ptadata: fetch and reduce pulsar timing array data."""
 
+import dataclasses
 from pathlib import Path
 
 import click
 import yaml
 
 from . import fetch as fetch_
+from . import noise_fit as noise_fit_
 from . import reduce as reduce_
 from . import sources
 
@@ -100,6 +102,51 @@ def run(settings_file):
     )
     click.echo(f"ptadata run complete for {pulsar}: status={report.status}")
     if report.status != "pass":
+        raise SystemExit(1)
+
+
+@main.command("noise-fit")
+@click.option("--par", "par_file", required=True, type=click.Path(exists=True, dir_okay=False))
+@click.option("--tim", "tim_files", required=True, multiple=True, type=click.Path(exists=True, dir_okay=False))
+@click.option("--outdir", required=True, type=click.Path(file_okay=False))
+@click.option("--niter", default=6000, show_default=True)
+@click.option("--burn", default=1000, show_default=True)
+@click.option("--red-noise-components", default=10, show_default=True)
+def noise_fit(par_file, tim_files, outdir, niter, burn, red_noise_components):
+    """Run a single-pulsar Bayesian noise fit (enterprise + PINT + PTMCMCSampler)."""
+    report = noise_fit_.run_noise_fit(
+        par_file, list(tim_files), outdir,
+        niter=niter, burn=burn, red_noise_components=red_noise_components,
+    )
+    click.echo(yaml.safe_dump(dataclasses.asdict(report), sort_keys=False))
+    if report.status != "complete":
+        raise SystemExit(1)
+
+
+@main.command("noise-run")
+@click.option("--settings", "settings_file", required=True, type=click.Path(exists=True, dir_okay=False))
+def noise_run(settings_file):
+    """Run noise fits for every subject in a settings file (used by the ptadata-noise Asimov pipeline)."""
+    with open(settings_file) as f:
+        settings = yaml.safe_load(f)
+
+    rundir = Path(settings["rundir"])
+    sampler = settings.get("sampler", {})
+
+    failures = []
+    for subject in settings["subjects"]:
+        outdir = rundir / "noise" / subject["name"]
+        report = noise_fit_.run_noise_fit(
+            subject["par"], subject["tim"], outdir,
+            niter=sampler.get("niter", 6000),
+            burn=sampler.get("burn", 1000),
+            red_noise_components=sampler.get("red noise components", 10),
+        )
+        click.echo(f"noise-run complete for {subject['name']}: status={report.status}")
+        if report.status != "complete":
+            failures.append(subject["name"])
+
+    if failures:
         raise SystemExit(1)
 
 
