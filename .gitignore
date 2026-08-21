@@ -100,3 +100,5 @@ tests/fixtures/
 # Generated at e2e workflow-run time (embeds an absolute CI runner path);
 # only tests/e2e_blueprints/event.yaml is a checked-in fixture.
 tests/e2e_blueprints/analysis.yaml
+tests/e2e_blueprints/reduce-analysis.yaml
+tests/e2e_blueprints/noise-analysis.yaml
