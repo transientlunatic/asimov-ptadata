@@ -91,3 +91,12 @@ Thumbs.db
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# Fixture pulsar data staged at test/CI-run time (e.g. copied from PINT's
+# bundled examples) - never committed, see tests/test_cli.py, test_pipeline.py
+# and .github/workflows/htcondor-e2e.yml.
+tests/fixtures/
+
+# Generated at e2e workflow-run time (embeds an absolute CI runner path);
+# only tests/e2e_blueprints/event.yaml is a checked-in fixture.
+tests/e2e_blueprints/analysis.yaml
