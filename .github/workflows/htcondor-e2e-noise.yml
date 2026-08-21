@@ -61,10 +61,19 @@ jobs:
         uses: etive-io/asimov/.github/actions/setup-asimov-env@main
         with:
           python-version: "3.10"
-          conda-packages: ""
+          # enterprise-pulsar pulls in scikit-sparse, which needs SuiteSparse's
+          # cholmod.h to build its C extension - not present as a dev header in
+          # the htcondor/mini (yum/RHEL-based) container, so a plain pip install
+          # fails with "fatal error: cholmod.h: No such file or directory"
+          # (confirmed the hard way on this workflow's first live run).
+          # conda-forge ships scikit-sparse as a pre-built binary with
+          # SuiteSparse bundled, so install it via conda first - pip then finds
+          # it already satisfied when it resolves enterprise-pulsar's deps.
+          conda-packages: "conda/noise-packages.txt"
           # asimov itself, plus the "noise" extra's real dependencies
           # (enterprise-pulsar, ptmcmcsampler) - both installed cleanly from
-          # PyPI with no native-build issues when this pipeline was built.
+          # PyPI with no native-build issues (beyond scikit-sparse, handled
+          # above) when this pipeline was built.
           # enterprise_extensions is deliberately not installed: the noise
           # model is built directly from enterprise.signals building blocks
           # (see asimov_ptadata/noise_fit.py), avoiding its
