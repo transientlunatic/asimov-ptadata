@@ -199,6 +199,70 @@ class PtadataPipelineTests(unittest.TestCase):
         production.pipeline.after_completion()
         self.assertEqual(production.status, "uploaded")
 
+    def _write_qc_report(self, production, status, **extra):
+        reduced_dir = Path(production.rundir) / "reduced"
+        reduced_dir.mkdir(parents=True, exist_ok=True)
+        report = {"pulsar": production.name, "ntoas": 10, "ntoas_flagged": 1, "status": status}
+        report.update(extra)
+        (reduced_dir / "qc_report.yml").write_text(yaml.safe_dump(report))
+        return report
+
+    def test_after_completion_approves_review_on_pass(self):
+        production = self._make_production()
+        self._write_qc_report(production, "pass")
+
+        production.pipeline.after_completion()
+
+        self.assertEqual(production.review.status, "APPROVED")
+        self.assertEqual(len(production.review), 1)
+        self.assertEqual(production.status, "uploaded")
+
+    def test_after_completion_leaves_needs_review_unreviewed(self):
+        production = self._make_production()
+        self._write_qc_report(production, "needs-review")
+
+        production.pipeline.after_completion()
+
+        self.assertIsNone(production.review.status)
+        self.assertEqual(len(production.review), 0)
+
+    def test_after_completion_rejects_review_on_failed(self):
+        production = self._make_production()
+        self._write_qc_report(production, "failed")
+
+        production.pipeline.after_completion()
+
+        self.assertEqual(production.review.status, "REJECTED")
+        self.assertEqual(len(production.review), 1)
+
+    def test_after_completion_without_qc_report_leaves_review_untouched(self):
+        # No reduced_dir/qc_report.yml at all - e.g. after_completion() called
+        # before the reduction job actually wrote its output.
+        production = self._make_production()
+        production.pipeline.after_completion()
+        self.assertIsNone(production.review.status)
+
+    def test_review_approved_filter_matches_only_approved_production(self):
+        # Exercises the real asimov filtering machinery
+        # (Analysis.matches_filter) that a downstream `analyses: [{pipeline:
+        # ptadata, review: approved}]` smart dependency would use, rather
+        # than just asserting on review.status directly.
+        passed = self._make_production(name="reduce-pass")
+        self._write_qc_report(passed, "pass")
+        passed.pipeline.after_completion()
+
+        pending = self._make_production(name="reduce-pending")
+        self._write_qc_report(pending, "needs-review")
+        pending.pipeline.after_completion()
+
+        failed = self._make_production(name="reduce-failed")
+        self._write_qc_report(failed, "failed")
+        failed.pipeline.after_completion()
+
+        self.assertTrue(passed.matches_filter(["review"], "approved"))
+        self.assertFalse(pending.matches_filter(["review"], "approved"))
+        self.assertFalse(failed.matches_filter(["review"], "approved"))
+
     def test_collect_assets_empty_before_rundir_exists(self):
         production = self._make_production()
         self.assertEqual(production.pipeline.collect_assets(), {})
