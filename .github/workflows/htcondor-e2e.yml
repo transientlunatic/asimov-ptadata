@@ -124,16 +124,23 @@ jobs:
             asimov configuration update condor/cron_minute '*/1'
 
       - name: Point pipelines/environment at the asimov conda env
-        # "asimov init" auto-detects this from the active `python` at init
-        # time, which - run here inside the activated "asimov" conda env -
-        # already resolves to the right place. Set it explicitly anyway as
-        # a safety net: it's exactly the path
-        # asimov_ptadata.pipeline.Pipeline.build_dag joins with "bin/ptadata"
-        # to find the executable to submit, so a wrong value here is a
-        # silent job-submission failure rather than a loud one.
+        # This is exactly the path asimov_ptadata.pipeline.Pipeline.build_dag
+        # joins with "bin/ptadata" to find the executable HTCondor submits,
+        # so a wrong value here is a silent job-submission failure (a held
+        # job, "No such file or directory") rather than a loud one - confirmed
+        # the hard way: hardcoding "/usr/share/miniconda/envs/asimov" here
+        # doesn't match where conda-incubator/setup-miniconda actually
+        # installs inside this container. Resolve it the same way asimov
+        # core's own setup-asimov-env action does it internally (via the
+        # active interpreter's sys.prefix, from inside the activated "asimov"
+        # env) instead of assuming a fixed path.
         uses: etive-io/asimov/.github/actions/run-asimov-command@main
         with:
-          script: asimov configuration update pipelines/environment /usr/share/miniconda/envs/asimov
+          script: |
+            ENV_PREFIX=$(python3 -c 'import sys; print(sys.prefix)')
+            echo "Resolved asimov conda env prefix: $ENV_PREFIX"
+            test -x "$ENV_PREFIX/bin/ptadata" || { echo "::error::$ENV_PREFIX/bin/ptadata not found or not executable"; exit 1; }
+            asimov configuration update pipelines/environment "$ENV_PREFIX"
 
       - name: Add test event
         uses: etive-io/asimov/.github/actions/run-asimov-command@main
