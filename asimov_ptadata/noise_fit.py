@@ -177,20 +177,41 @@ def run_noise_fit(
     cov = np.diag(np.ones(ndim) * 0.1**2)
 
     chain_dir = outdir / "chain"
-    sampler = PTSampler(ndim, pta.get_lnlikelihood, pta.get_lnprior, cov, outDir=str(chain_dir))
-    sampler.sample(
-        x0,
-        niter,
-        burn=burn,
-        thin=1,
-        isave=max(burn, 1),
-        covUpdate=cov_update,
-        SCAMweight=30,
-        AMweight=15,
-        DEweight=50,
-    )
+    try:
+        sampler = PTSampler(ndim, pta.get_lnlikelihood, pta.get_lnprior, cov, outDir=str(chain_dir))
+        sampler.sample(
+            x0,
+            niter,
+            burn=burn,
+            thin=1,
+            isave=max(burn, 1),
+            covUpdate=cov_update,
+            SCAMweight=30,
+            AMweight=15,
+            DEweight=50,
+        )
+        chain = np.loadtxt(chain_dir / "chain_1.txt")
+    except Exception as exc:
+        # A report has to land here regardless of outcome: the Asimov
+        # pipeline's detect_completion() just checks for this file's
+        # existence, so a bare exception here (an unstable proposal, a
+        # malformed/truncated chain file, ...) would otherwise leave the
+        # job polling forever instead of surfacing a visible failure -
+        # same reasoning as the _build_pta failure path above.
+        report = NoiseFitReport(
+            pulsar=pulsar_name,
+            ntoas=0,
+            param_names=[],
+            posterior_means=[],
+            n_samples=0,
+            acceptance_fraction=None,
+            sampler="PTMCMCSampler",
+            status="failed",
+            notes=[f"sampling failed: {exc}"],
+        )
+        report.save(outdir / "noise_report.yml")
+        return report
 
-    chain = np.loadtxt(chain_dir / "chain_1.txt")
     if chain.ndim == 1:
         chain = chain.reshape(1, -1)
 

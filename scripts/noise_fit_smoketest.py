@@ -65,20 +65,25 @@ def _ensure_ephemeris(ephem="de421"):
     mirror_url = f"https://raw.githubusercontent.com/skyfielders/python-skyfield/master/ci/{ephem}.bsp"
     with tempfile.NamedTemporaryFile(suffix=".bsp", delete=False) as f:
         tmp_path = f.name
-    urllib.request.urlretrieve(mirror_url, tmp_path)
+    try:
+        # urlretrieve() has no timeout parameter; urlopen() does, and a
+        # stalled download otherwise has no bound at all here.
+        with urllib.request.urlopen(mirror_url, timeout=60) as response, open(tmp_path, "wb") as out:
+            shutil.copyfileobj(response, out)
 
-    # astropy/PINT each try a short, slightly different list of URLs for
-    # this ephemeris (see astropy.coordinates.solar_system._get_kernel and
-    # pint.solar_system_ephemerides.ephemeris_mirrors) - seed all of them so
-    # whichever one gets tried first hits the cache.
-    candidate_urls = [
-        f"https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/{ephem}.bsp",
-        f"https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/a_old_versions/{ephem}.bsp",
-    ]
-    for url in candidate_urls:
-        import_file_to_cache(url, tmp_path)
-        download_file(url, cache=True, sources=[url])
-    Path(tmp_path).unlink(missing_ok=True)
+        # astropy/PINT each try a short, slightly different list of URLs for
+        # this ephemeris (see astropy.coordinates.solar_system._get_kernel
+        # and pint.solar_system_ephemerides.ephemeris_mirrors) - seed all of
+        # them so whichever one gets tried first hits the cache.
+        candidate_urls = [
+            f"https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/{ephem}.bsp",
+            f"https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/a_old_versions/{ephem}.bsp",
+        ]
+        for url in candidate_urls:
+            import_file_to_cache(url, tmp_path)
+            download_file(url, cache=True, sources=[url])
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
 
     with coord.solar_system_ephemeris.set(ephem):
         pass

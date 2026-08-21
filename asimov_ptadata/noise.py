@@ -30,9 +30,11 @@ A blueprint for this pipeline looks like::
 The nested list under ``analyses`` is asimov's AND-group smart-dependency
 syntax (see ``docs/source/analyses.rst`` in asimov core): it resolves, per
 subject, only the ``ptadata`` reduce production(s) whose
-``review.status == "approved"`` - i.e. exactly the productions
-``asimov_ptadata.pipeline.Pipeline.after_completion`` auto-approves when the
-QC report says ``status: pass``. A single-key dict like
+``review.status == "APPROVED"`` (asimov's own ``Review``/``ReviewMessage``
+states are uppercase; the blueprint's ``"review: approved"`` string matches
+case-insensitively via ``Analysis.matches_filter``) - i.e. exactly the
+productions ``asimov_ptadata.pipeline.Pipeline.after_completion``
+auto-approves when the QC report says ``status: pass``. A single-key dict like
 ``{pipeline: ptadata, review: approved}`` is *not* equivalent here:
 ``Analysis._parse_single_dependency`` only accepts single-key dicts (or an
 ``optional: true`` pair), so combining two conditions requires the AND-group
@@ -95,7 +97,13 @@ class NoisePipeline(asimov.pipeline.Pipeline):
             if analysis.review.status != "APPROVED":
                 continue
             # If more than one review-approved reduce production exists for
-            # the same subject, prefer the most recently reviewed one.
+            # the same subject, this just keeps the last one encountered in
+            # self.production.analyses's iteration order - not necessarily
+            # the most recently reviewed one. Deliberately not resolved here:
+            # flagged as an open question in the PR for whoever decides the
+            # policy (most-recent-production vs. most-recent-review-message
+            # both need a real ordering source, and it isn't obvious which
+            # one is "right" without knowing how this will actually be used).
             approved_by_subject[analysis.event.name] = analysis
 
         resolved = {}
@@ -184,11 +192,7 @@ class NoisePipeline(asimov.pipeline.Pipeline):
         return getattr(self, "_cluster_id", None)
 
     def _subject_names(self):
-        # `._subjects` is the raw list of subject-name strings the blueprint
-        # was given, cheaper than `.subjects` (which does a ledger lookup
-        # per subject) and all that's needed to find this job's own output
-        # files.
-        return self.production._subjects
+        return [subject.name for subject in self.production.subjects]
 
     def _noise_report_path(self, subject_name):
         return os.path.join(self.production.rundir, "noise", subject_name, "noise_report.yml")
