@@ -54,6 +54,22 @@ class PtadataPipelineTests(unittest.TestCase):
         self.test_dir = tempfile.mkdtemp()
         os.chdir(self.test_dir)
 
+        # Event repos created by apply_page() are plain `git init` checkouts,
+        # and asimov.git.GitRepo.update() (called via find_prods() in
+        # build_dag()) hardcodes `git checkout master` against them - so the
+        # ambient `init.defaultBranch` has to actually be "master" for that
+        # checkout to succeed. Override it for this test process only, via
+        # GIT_CONFIG_GLOBAL, rather than assuming (or mutating) the real
+        # machine's global git config - CI runners and contributors' own
+        # machines commonly default to "main" instead.
+        git_config_file = Path(self.test_dir) / ".gitconfig-test"
+        git_config_file.write_text(
+            "[init]\n\tdefaultBranch = master\n"
+            "[user]\n\temail = test@example.com\n\tname = Test User\n"
+        )
+        self._old_git_config_global = os.environ.get("GIT_CONFIG_GLOBAL")
+        os.environ["GIT_CONFIG_GLOBAL"] = str(git_config_file)
+
         runner = CliRunner()
         result = runner.invoke(project.init, ["Test Project", "--root", self.test_dir])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -75,6 +91,10 @@ class PtadataPipelineTests(unittest.TestCase):
         shutil.copy(pint.config.examplefile("NGC6440E.tim"), psr_dir / "1748-2021E.tim")
 
     def tearDown(self):
+        if self._old_git_config_global is None:
+            os.environ.pop("GIT_CONFIG_GLOBAL", None)
+        else:
+            os.environ["GIT_CONFIG_GLOBAL"] = self._old_git_config_global
         os.chdir(self.cwd)
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
