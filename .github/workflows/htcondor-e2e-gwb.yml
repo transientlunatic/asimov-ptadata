@@ -118,8 +118,27 @@ jobs:
             for name, stem in fixtures.items():
                 psr_dir = pathlib.Path(f"tests/fixtures/release/{name}")
                 psr_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy(pint.config.examplefile(f"{stem}.par"), psr_dir / f"{name}.par")
+                par_dest = psr_dir / f"{name}.par"
+                shutil.copy(pint.config.examplefile(f"{stem}.par"), par_dest)
                 shutil.copy(pint.config.examplefile(f"{stem}.tim"), psr_dir / f"{name}.tim")
+
+                # NGC6440E.par declares EPHEM explicitly; J1028-5819-example.par
+                # doesn't. Without it, PINT's TOA loading emits a "No ephemeris
+                # provided ... Using DE421" warning - and
+                # asimov_ptadata.reduce.reduce_pulsar treats *any* loading
+                # warning as reason to mark QC status "needs-review" rather
+                # than "pass", which leaves the reduce production's review
+                # unset instead of auto-APPROVED. That breaks the review-gated
+                # dependency chain this workflow exists to exercise, for a
+                # reason that has nothing to do with the data's actual
+                # quality - confirmed directly by reproducing reduce_pulsar()
+                # against this exact fixture locally. Declaring the ephemeris
+                # explicitly (matching NGC6440E.par's own style) avoids the
+                # warning at the source instead of loosening the QC check.
+                if "EPHEM" not in par_dest.read_text():
+                    with open(par_dest, "a") as f:
+                        f.write("EPHEM               DE421\n")
+
                 print(f"Staged fixture pulsar data in {psr_dir.resolve()}")
             PYEOF
 
