@@ -7,6 +7,7 @@ import click
 import yaml
 
 from . import fetch as fetch_
+from . import gwb_fit as gwb_fit_
 from . import noise_fit as noise_fit_
 from . import reduce as reduce_
 from . import sources
@@ -147,6 +148,58 @@ def noise_run(settings_file):
             failures.append(subject["name"])
 
     if failures:
+        raise SystemExit(1)
+
+
+@main.command("gwb-fit")
+@click.option(
+    "--pulsars", "pulsars_file", required=True, type=click.Path(exists=True, dir_okay=False),
+    help=(
+        "YAML file listing pulsars for the joint fit: a list of mappings with "
+        "name, par, tim, and the fixed noise values (efac, log10_t2equad, "
+        "red_noise_gamma, red_noise_log10_A) - see asimov_ptadata.gwb_fit.FIXED_NOISE_PARAMS."
+    ),
+)
+@click.option("--outdir", required=True, type=click.Path(file_okay=False))
+@click.option("--niter", default=6000, show_default=True)
+@click.option("--burn", default=1000, show_default=True)
+@click.option("--red-noise-components", default=10, show_default=True)
+@click.option("--gwb-components", default=10, show_default=True)
+def gwb_fit(pulsars_file, outdir, niter, burn, red_noise_components, gwb_components):
+    """Run a real, joint array-wide GWB search (fixed noise, enterprise + PINT + PTMCMCSampler)."""
+    with open(pulsars_file) as f:
+        pulsars = yaml.safe_load(f)
+    report = gwb_fit_.run_gwb_fit(
+        pulsars, outdir,
+        niter=niter, burn=burn,
+        red_noise_components=red_noise_components,
+        gwb_components=gwb_components,
+    )
+    click.echo(yaml.safe_dump(dataclasses.asdict(report), sort_keys=False))
+    if report.status != "complete":
+        raise SystemExit(1)
+
+
+@main.command("gwb-run")
+@click.option("--settings", "settings_file", required=True, type=click.Path(exists=True, dir_okay=False))
+def gwb_run(settings_file):
+    """Run the joint GWB search for every subject in a settings file (used by the ptadata-gwb Asimov pipeline)."""
+    with open(settings_file) as f:
+        settings = yaml.safe_load(f)
+
+    rundir = Path(settings["rundir"])
+    sampler = settings.get("sampler", {})
+    outdir = rundir / "gwb"
+
+    report = gwb_fit_.run_gwb_fit(
+        settings["pulsars"], outdir,
+        niter=sampler.get("niter", 6000),
+        burn=sampler.get("burn", 1000),
+        red_noise_components=sampler.get("red noise components", 10),
+        gwb_components=sampler.get("gwb components", 10),
+    )
+    click.echo(f"gwb-run complete: status={report.status}")
+    if report.status != "complete":
         raise SystemExit(1)
 
 

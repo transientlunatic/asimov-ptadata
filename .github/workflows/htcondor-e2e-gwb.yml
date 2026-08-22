@@ -1,0 +1,432 @@
+name: HTCondor End-to-End Test (gwb-search)
+
+# Extends htcondor-e2e-noise.yml's pattern (reduce -> QC/review -> a real
+# ptadata-noise noise fit -> review) one stage further: two independent
+# pulsars are each reduced and noise-fit exactly as in
+# htcondor-e2e-noise.yml, then a single joint ptadata-gwb ProjectAnalysis
+# (a real, fixed-noise, Hellings-Downs-correlated common-process search
+# across both pulsars at once - see asimov_ptadata/gwb.py/gwb_fit.py) is
+# gated on *both* noise-fit productions' review status and run to
+# completion on real HTCondor.
+#
+# NOTE: this workflow is reasoned from source (asimov_ptadata/gwb.py,
+# asimov's own analysis.py/ledger.py/manage.py) plus the two gotchas noted
+# below, but has not been run against a live GitHub Actions runner as part
+# of this PR - see the PR description. Expect it may need a round of live-CI
+# debugging.
+#
+# Caution for anyone touching this file - two gotchas already paid for in
+# htcondor-e2e.yml/htcondor-e2e-noise.yml's own debugging history, and
+# proactively applied here rather than rediscovered:
+#   (a) run-asimov-command pipes its `script:` into an *unquoted*
+#       `su - submituser <<SUBMITUSER ... SUBMITUSER` heredoc. Any
+#       `$(...)`/`$VAR` meant to be evaluated *after* `conda activate
+#       asimov` (inside the activated env) must be escaped as
+#       `\$(...)`/`\$VAR`, or it silently evaluates in the wrong (outer,
+#       root, pre-activation) shell instead. Plain CI-provided values like
+#       $GITHUB_WORKSPACE are fine unescaped (same value either way).
+#   (b) enterprise-pulsar pulls in scikit-sparse, which needs the real
+#       suitesparse-devel yum package (from EPEL) installed *before* the
+#       pip install step - a conda-forge scikit-sparse pre-install was
+#       tried on htcondor-e2e-noise.yml and did not avoid pip's own source
+#       build of it, which is what actually needs the headers.
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  htcondor-e2e-gwb:
+    name: "ptadata-gwb via asimov on HTCondor"
+    runs-on: ubuntu-latest
+    container:
+      image: htcondor/mini:latest
+      options: --privileged
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: etive-io/asimov/.github/actions/setup-htcondor@main
+
+      - name: Install base tools
+        run: |
+          yum install -y sudo git
+
+      - name: Install SuiteSparse development headers
+        # See gotcha (b) above - scikit-sparse (an enterprise-pulsar
+        # dependency) fatal-errors on cholmod.h without these; the real dev
+        # package (EPEL on this RHEL-family image) is the direct fix, not a
+        # conda-forge scikit-sparse pre-install.
+        run: |
+          yum install -y epel-release
+          yum install -y suitesparse-devel
+
+      - name: Create submit user
+        uses: etive-io/asimov/.github/actions/create-submit-user@main
+
+      - name: Ensure submituser can access workspace
+        run: |
+          chmod -R a+rwX "$GITHUB_WORKSPACE"
+
+      - name: Setup Asimov Environment
+        uses: etive-io/asimov/.github/actions/setup-asimov-env@main
+        with:
+          python-version: "3.10"
+          conda-packages: ""
+          # asimov itself, plus the "noise" extra's real dependencies -
+          # ptadata-gwb needs the same enterprise-pulsar/ptmcmcsampler stack
+          # ptadata-noise does, no extra packages beyond that (see
+          # pyproject.toml: gp_signals/utils are already part of
+          # enterprise-pulsar).
+          extra-packages: "asimov>=0.7 enterprise-pulsar ptmcmcsampler"
+
+      - name: Set up git
+        run: |
+          su - submituser <<SUBMITUSER
+          set -euo pipefail
+          git config --global init.defaultBranch master
+          git config --global user.email "you@example.com"
+          git config --global user.name "Your Name"
+          SUBMITUSER
+
+      - name: Stage fixture pulsar data
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          # Two genuinely distinct real pulsars, both bundled with PINT's
+          # own example data - not one pulsar's TOAs reused under two
+          # aliases - so the Hellings-Downs common-process construction is
+          # structurally real (two distinct sky positions/TOA sets jointly
+          # constraining one shared GWB parameter pair). See
+          # scripts/gwb_fit_smoketest.py's docstring for the same choice
+          # made the same way.
+          script: |
+            python3 << 'PYEOF'
+            import pathlib
+            import shutil
+
+            import pint.config
+
+            fixtures = {
+                "1748-2021E": "NGC6440E",
+                "J1028-5819": "J1028-5819-example",
+            }
+            for name, stem in fixtures.items():
+                psr_dir = pathlib.Path(f"tests/fixtures/release/{name}")
+                psr_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy(pint.config.examplefile(f"{stem}.par"), psr_dir / f"{name}.par")
+                shutil.copy(pint.config.examplefile(f"{stem}.tim"), psr_dir / f"{name}.tim")
+                print(f"Staged fixture pulsar data in {psr_dir.resolve()}")
+            PYEOF
+
+      - name: Write analysis blueprints
+        run: |
+          mkdir -p tests/e2e_blueprints
+          for PSR in 1748-2021E J1028-5819; do
+            cat > "tests/e2e_blueprints/event-$PSR.yaml" <<EOF
+          kind: event
+          name: $PSR
+          EOF
+            cat > "tests/e2e_blueprints/reduce-$PSR.yaml" <<EOF
+          kind: analysis
+          name: reduce
+          pipeline: ptadata
+          status: ready
+          data:
+            release root: $GITHUB_WORKSPACE/tests/fixtures/release
+          reduction:
+            sigma threshold: 5.0
+            refit: true
+          EOF
+            cat > "tests/e2e_blueprints/noise-$PSR.yaml" <<EOF
+          kind: projectanalysis
+          name: noise-fit-$PSR
+          pipeline: ptadata-noise
+          subjects:
+            - $PSR
+          analyses:
+            - - "pipeline: ptadata"
+              - "review: approved"
+          status: ready
+          sampler:
+            niter: 800
+            burn: 200
+            red noise components: 5
+          EOF
+          done
+          # One joint ptadata-gwb project analysis across both subjects. The
+          # analyses: field here is documentation of intent only - it is
+          # NOT what actually gates this analysis (see asimov_ptadata/gwb.py's
+          # module docstring for why depending on another ProjectAnalysis,
+          # like ptadata-noise, can't use the standard analyses: smart
+          # dependency mechanism); the real gate is
+          # GWBPipeline._resolve_subject_data(), exercised below by simply
+          # trying to build/submit before and after the noise-fit stages are
+          # approved.
+          cat > tests/e2e_blueprints/gwb-search.yaml <<'EOF'
+          kind: projectanalysis
+          name: gwb-search
+          pipeline: ptadata-gwb
+          subjects:
+            - 1748-2021E
+            - J1028-5819
+          analyses:
+            - - "pipeline: ptadata-noise"
+              - "review: approved"
+          status: ready
+          sampler:
+            niter: 800
+            burn: 200
+            red noise components: 5
+            gwb components: 5
+          EOF
+          chmod a+rwX tests/e2e_blueprints/*.yaml
+          for f in tests/e2e_blueprints/*.yaml; do echo "== $f =="; cat "$f"; done
+
+      - name: Create asimov project
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov init "Test Project"
+
+      - name: Configure asimov user
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov configuration update condor/user submituser
+
+      - name: Configure HTCondor settings
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: |
+            asimov configuration update condor/cache_time 30
+            asimov configuration update condor/cron_minute '*/1'
+
+      - name: Point pipelines/environment at the asimov conda env
+        # See gotcha (a) above for why the `\$`s below are deliberate.
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: |
+            ENV_PREFIX=\$(python3 -c 'import sys; print(sys.prefix)')
+            echo "Resolved asimov conda env prefix: \$ENV_PREFIX"
+            test -x "\$ENV_PREFIX/bin/ptadata" || { echo "::error::\$ENV_PREFIX/bin/ptadata not found or not executable"; exit 1; }
+            asimov configuration update pipelines/environment "\$ENV_PREFIX"
+
+      - name: Add test events
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: |
+            asimov apply -f "$GITHUB_WORKSPACE/tests/e2e_blueprints/event-1748-2021E.yaml"
+            asimov apply -f "$GITHUB_WORKSPACE/tests/e2e_blueprints/event-J1028-5819.yaml"
+
+      - name: Add ptadata reduce analyses
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: |
+            asimov apply -f "$GITHUB_WORKSPACE/tests/e2e_blueprints/reduce-1748-2021E.yaml" -e 1748-2021E
+            asimov apply -f "$GITHUB_WORKSPACE/tests/e2e_blueprints/reduce-J1028-5819.yaml" -e J1028-5819
+
+      - name: Build and submit ptadata reduce jobs
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov manage build submit
+
+      - name: Wait for reduce completion (1748-2021E)
+        uses: etive-io/asimov/.github/actions/wait-for-files@main
+        with:
+          patterns: "qc_report.yml"
+          directory: "working/1748-2021E/reduce/reduced"
+          timeout: "300"
+          interval: "10"
+          working-directory: .
+
+      - name: Wait for reduce completion (J1028-5819)
+        uses: etive-io/asimov/.github/actions/wait-for-files@main
+        with:
+          patterns: "qc_report.yml"
+          directory: "working/J1028-5819/reduce/reduced"
+          timeout: "300"
+          interval: "10"
+          working-directory: .
+
+      - name: Run asimov monitor (detects reduce completion, auto-approves review)
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov monitor
+
+      - name: Verify both reduce productions were auto-approved
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: |
+            python3 << 'PYEOF'
+            import sys
+            from asimov.ledger import YAMLLedger
+
+            ledger = YAMLLedger(".asimov/ledger.yml")
+            failures = []
+            for name in ["1748-2021E", "J1028-5819"]:
+                event = ledger.get_event(name)[0]
+                reduce = [p for p in event.productions if p.name == "reduce"][0]
+                print(f"{name} reduce status: {reduce.status}, review: {reduce.review.status}")
+                if reduce.review.status != "APPROVED":
+                    failures.append(name)
+            if failures:
+                print(f"FAIL: reduce production(s) not auto-approved: {failures}")
+                sys.exit(1)
+            print("OK: both reduce productions auto-approved via QC pass")
+            PYEOF
+
+      - name: Add ptadata-noise project analyses
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: |
+            asimov apply -f "$GITHUB_WORKSPACE/tests/e2e_blueprints/noise-1748-2021E.yaml"
+            asimov apply -f "$GITHUB_WORKSPACE/tests/e2e_blueprints/noise-J1028-5819.yaml"
+
+      - name: Build and submit noise-fit jobs
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov manage build submit
+
+      - name: Wait for noise-fit completion (1748-2021E)
+        uses: etive-io/asimov/.github/actions/wait-for-files@main
+        with:
+          patterns: "noise_report.yml"
+          directory: "working/project-analyses/1748-2021E/noise-fit-1748-2021E/noise/1748-2021E"
+          timeout: "300"
+          interval: "10"
+          working-directory: .
+
+      - name: Wait for noise-fit completion (J1028-5819)
+        uses: etive-io/asimov/.github/actions/wait-for-files@main
+        with:
+          patterns: "noise_report.yml"
+          directory: "working/project-analyses/J1028-5819/noise-fit-J1028-5819/noise/J1028-5819"
+          timeout: "300"
+          interval: "10"
+          working-directory: .
+
+      - name: Run asimov monitor (detects noise-fit completion, auto-approves review)
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov monitor
+
+      - name: Verify both noise-fit productions were auto-approved
+        # Confirms the real two-hop review-gating machinery this PR adds
+        # (GWBPipeline._resolve_subject_data() walking
+        # ledger.project_analyses for review-approved ptadata-noise
+        # productions - see asimov_ptadata/gwb.py's module docstring) has
+        # something real to find before the gwb-search stage is submitted.
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: |
+            python3 << 'PYEOF'
+            import sys
+            from asimov.ledger import YAMLLedger
+
+            ledger = YAMLLedger(".asimov/ledger.yml")
+            failures = []
+            for name in ["1748-2021E", "J1028-5819"]:
+                matches = [
+                    a for a in ledger.project_analyses
+                    if a.pipeline.name == "ptadata-noise" and name in a._subjects
+                ]
+                if not matches:
+                    print(f"FAIL: no ptadata-noise project analysis found for {name}")
+                    failures.append(name)
+                    continue
+                analysis = matches[0]
+                print(f"{name} noise-fit status: {analysis.status}, review: {analysis.review.status}")
+                if analysis.review.status != "APPROVED":
+                    failures.append(name)
+            if failures:
+                print(f"FAIL: noise-fit production(s) not auto-approved: {failures}")
+                sys.exit(1)
+            print("OK: both noise-fit productions auto-approved via a completed noise report")
+            PYEOF
+
+      - name: Add ptadata-gwb project analysis
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov apply -f "$GITHUB_WORKSPACE/tests/e2e_blueprints/gwb-search.yaml"
+
+      - name: Build and submit gwb-search job
+        # GWBPipeline.build_dag() resolves both review-approved noise-fit
+        # productions' par/tim + fixed-noise assets and writes ONE joint
+        # settings file the submitted `ptadata gwb-run` job reads.
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov manage build submit
+
+      - name: Wait for gwb-search completion
+        uses: etive-io/asimov/.github/actions/wait-for-files@main
+        with:
+          patterns: "gwb_report.yml"
+          directory: "working/project-analyses/1748-2021E_J1028-5819/gwb-search/gwb"
+          timeout: "300"
+          interval: "10"
+          working-directory: .
+
+      - name: Run asimov monitor (detects gwb-search completion)
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: asimov monitor
+
+      - name: Write verification script
+        run: |
+          cat > /tmp/verify_gwb.py <<'EOF'
+          import sys
+          from asimov.monitor_api import get_analysis_status
+
+          # No downstream stage promotes any of these to "complete", so all
+          # three terminate at "uploaded" - matching htcondor-e2e-noise.yml's
+          # own acceptance criteria.
+          ACCEPTED = {"complete", "uploaded"}
+
+          statuses = get_analysis_status()
+          print("Final analysis statuses:")
+          failures = []
+          for name, status in statuses.items():
+              print(f"  {name}: {status}")
+              if str(status).lower() not in ACCEPTED:
+                  failures.append(f"{name}: {status}")
+          if failures:
+              print(f"\nFAIL: {len(failures)} analyses not complete/uploaded:")
+              for f in failures:
+                  print(f"  - {f}")
+              sys.exit(1)
+          print(f"\nAll {len(statuses)} analyses reached a successful terminal state!")
+          EOF
+          chmod 644 /tmp/verify_gwb.py
+
+      - name: Verify gwb-search analysis completed
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: python3 /tmp/verify_gwb.py
+
+      - name: Report the gwb-search result
+        uses: etive-io/asimov/.github/actions/run-asimov-command@main
+        with:
+          script: |
+            python3 << 'PYEOF'
+            import yaml
+
+            with open("working/project-analyses/1748-2021E_J1028-5819/gwb-search/gwb/gwb_report.yml") as f:
+                report = yaml.safe_load(f)
+            print("GWB-search report:")
+            print(yaml.safe_dump(report, sort_keys=False))
+            PYEOF
+
+      - name: Archive artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: htcondor-e2e-gwb-debug
+          path: |
+            .asimov/
+            working/
+            checkouts/
+            tests/fixtures/
+          retention-days: 5
