@@ -224,6 +224,26 @@ def run_gwb_fit(
 
     if cov_update is None:
         cov_update = burn
+    elif cov_update != burn:
+        report = GWBFitReport(
+            pulsars=[p["name"] for p in pulsars],
+            ntoas={},
+            param_names=[],
+            posterior_means=[],
+            n_samples=0,
+            acceptance_fraction=None,
+            sampler="PTMCMCSampler",
+            status="failed",
+            notes=[
+                f"cov_update ({cov_update}) must match burn ({burn}) - "
+                "PTMCMCSampler's DE-jump buffer (sized from burn) and its "
+                "AM-proposal buffer (sized from covUpdate) must agree, or "
+                "_updateDEbuffer raises a ValueError partway through "
+                "sampling. Failing fast here instead of letting that happen."
+            ],
+        )
+        report.save(outdir / "gwb_report.yml")
+        return report
 
     pulsar_names = [p["name"] for p in pulsars]
     notes = []

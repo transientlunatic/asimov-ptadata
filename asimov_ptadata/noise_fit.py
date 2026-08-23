@@ -146,6 +146,26 @@ def run_noise_fit(
 
     if cov_update is None:
         cov_update = burn
+    elif cov_update != burn:
+        report = NoiseFitReport(
+            pulsar=Path(par_file).stem,
+            ntoas=0,
+            param_names=[],
+            posterior_means=[],
+            n_samples=0,
+            acceptance_fraction=None,
+            sampler="PTMCMCSampler",
+            status="failed",
+            notes=[
+                f"cov_update ({cov_update}) must match burn ({burn}) - "
+                "PTMCMCSampler's DE-jump buffer (sized from burn) and its "
+                "AM-proposal buffer (sized from covUpdate) must agree, or "
+                "_updateDEbuffer raises a ValueError partway through "
+                "sampling. Failing fast here instead of letting that happen."
+            ],
+        )
+        report.save(outdir / "noise_report.yml")
+        return report
 
     pulsar_name = Path(par_file).stem
     notes = []
