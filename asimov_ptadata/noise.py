@@ -49,6 +49,7 @@ import yaml
 import asimov.pipeline
 from asimov import config
 from asimov.pipeline import PipelineException
+from asimov.review import ReviewMessage
 from asimov.scheduler import JobDescription
 
 
@@ -207,14 +208,97 @@ class NoisePipeline(asimov.pipeline.Pipeline):
         return False
 
     def after_completion(self):
+        """
+        Runs automatically once the noise-fit job completes (see
+        ``asimov.monitor_states``), mirroring
+        ``asimov_ptadata.pipeline.Pipeline.after_completion``'s translation
+        of an automated report into a real asimov review decision
+        (``self.production.review``) - see that method's docstring for the
+        full reasoning. The GWB search stage (``asimov_ptadata.gwb``) gates
+        on this the same way ``ptadata-noise`` gates on ``ptadata``'s QC
+        review, one level further up the chain.
+
+        Unlike the QC report's three-way ``pass``/``needs-review``/``failed``
+        taxonomy, ``NoiseFitReport.status`` (``noise_fit.py``) only ever
+        takes two values - ``"complete"`` or ``"failed"`` - there is no
+        automated middle ground that would warrant leaving the review
+        unset while a human looks at it. So the translation collapses to:
+
+        - every subject's noise report reached ``status: complete`` -> an
+          ``APPROVED`` review message is added.
+        - at least one subject's noise report says ``status: failed`` (or a
+          subject with a report file is missing outright once *some*
+          reports exist) -> an explicit ``REJECTED`` review message is
+          added, naming which subject(s) failed.
+        - no noise report exists for *any* subject yet (e.g. this is called
+          before the job has actually produced anything) -> nothing is
+          added and the review stays unset, matching
+          ``Pipeline.after_completion``'s behaviour when no ``qc_report.yml``
+          exists yet at all.
+        """
+        statuses = {}
+        for subject_name in self._subject_names():
+            report_path = self._noise_report_path(subject_name)
+            if not os.path.exists(report_path):
+                continue
+            with open(report_path) as f:
+                report = yaml.safe_load(f)
+            statuses[subject_name] = report.get("status", "failed")
+
+        if statuses:
+            failed = [name for name in self._subject_names() if statuses.get(name) != "complete"]
+            if not failed:
+                self.production.review.add(
+                    ReviewMessage(
+                        message="Automated noise fit(s) completed",
+                        production=self.production,
+                        status="APPROVED",
+                    )
+                )
+            else:
+                self.production.review.add(
+                    ReviewMessage(
+                        message=f"Automated noise fit failed or missing for: {', '.join(failed)}",
+                        production=self.production,
+                        status="REJECTED",
+                    )
+                )
+
         self.production.status = "uploaded"
 
     def collect_assets(self):
         """
-        Collect the assets for this job: each subject's noise report and
-        raw PTMCMCSampler chain file.
+        Collect the assets for this job: each subject's noise report, raw
+        PTMCMCSampler chain file, and (fixed-noise) par/tim paths.
+
+        The par/tim paths are re-resolved via ``_resolve_subject_assets()``
+        (the same logic ``build_dag()`` uses to write the settings file)
+        rather than being duplicated by whatever calls this - this is what
+        lets a downstream GWB search stage (``asimov_ptadata.gwb``) depend
+        only on this pipeline's public output shape, not on reaching two
+        hops back into the reduce production's own assets itself. Exposed
+        as ``"par"``/``"tim"`` (matching ``asimov_ptadata.pipeline.Pipeline
+        .collect_assets``'s naming), but keyed by subject name - unlike the
+        single-subject reduce ``Pipeline``, a ``NoisePipeline`` production
+        always covers a ``subjects:`` list, so this shape matches the
+        existing "noise reports"/"chains" keys below rather than
+        introducing a third convention.
+
+        If the review-approved reduce dependency isn't resolvable any more
+        (e.g. asked for before/without a successful ``build_dag()``, or the
+        dependency's review status has changed since), "par"/"tim" are
+        simply omitted rather than raising - this method has always been
+        best-effort about what it can currently report.
         """
         outputs = {}
+        try:
+            subject_assets = self._resolve_subject_assets()
+        except PipelineException:
+            subject_assets = {}
+        if subject_assets:
+            outputs["par"] = {name: assets["par"] for name, assets in subject_assets.items()}
+            outputs["tim"] = {name: assets["tim"] for name, assets in subject_assets.items()}
+
         for subject_name in self._subject_names():
             report_path = self._noise_report_path(subject_name)
             if not os.path.exists(report_path):

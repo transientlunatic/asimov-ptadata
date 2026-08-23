@@ -44,13 +44,15 @@ asimov = [
 ]
 noise = [
     # Needed alongside (not instead of) the "asimov" extra to actually run
-    # the ptadata-noise Asimov pipeline; kept as a separate group so
-    # existing `ptadata reduce` users aren't forced to install this heavier
-    # stack. enterprise_extensions was deliberately left out: the noise
-    # model here is built directly from enterprise.signals building blocks
-    # (see asimov_ptadata/noise_fit.py), which avoids pulling in
-    # enterprise_extensions' healpy/scikit-learn dependency chain for a
-    # single-pulsar white+red-noise model that doesn't need it.
+    # the ptadata-noise and ptadata-gwb Asimov pipelines; kept as a separate
+    # group so existing `ptadata reduce` users aren't forced to install this
+    # heavier stack. enterprise_extensions was deliberately left out: both
+    # the single-pulsar noise model and the array-wide GWB common process
+    # are built directly from enterprise.signals building blocks (see
+    # asimov_ptadata/noise_fit.py, asimov_ptadata/gwb_fit.py -
+    # gp_signals.FourierBasisCommonGP + utils.hd_orf, already part of
+    # enterprise-pulsar), which avoids pulling in enterprise_extensions'
+    # healpy/scikit-learn dependency chain for models that don't need it.
     "asimov>=0.7",
     "enterprise-pulsar",
     "ptmcmcsampler",
@@ -71,6 +73,7 @@ ptadata = "asimov_ptadata.cli:main"
 [project.entry-points."asimov.pipelines"]
 ptadata = "asimov_ptadata:Pipeline"
 ptadata-noise = "asimov_ptadata.noise:NoisePipeline"
+ptadata-gwb = "asimov_ptadata.gwb:GWBPipeline"
 
 [project.urls]
 "Source code" = "https://github.com/transientlunatic/asimov-ptadata"
@@ -79,7 +82,7 @@ ptadata-noise = "asimov_ptadata.noise:NoisePipeline"
 packages = ["asimov_ptadata"]
 
 [tool.setuptools.package-data]
-asimov_ptadata = ["settings_template.yml", "noise_settings_template.yml"]
+asimov_ptadata = ["settings_template.yml", "noise_settings_template.yml", "gwb_settings_template.yml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

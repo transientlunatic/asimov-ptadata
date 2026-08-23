@@ -306,6 +306,96 @@ class NoisePipelineTests(unittest.TestCase):
         analysis = self._make_project_analysis()
         self.assertEqual(analysis.pipeline.collect_assets(), {})
 
+    # -- review-gating (mirrors the reduce Pipeline's after_completion) -----
+
+    def test_collect_assets_exposes_par_and_tim_when_reduce_approved(self):
+        # Confirms the GWB pipeline's real dependency surface: par/tim paths
+        # exposed directly by NoisePipeline.collect_assets(), not something
+        # a caller has to reach two hops back into the reduce production for.
+        self._make_reduce_production("reduce", review_status="pass")
+        analysis = self._make_project_analysis()
+
+        assets = analysis.pipeline.collect_assets()
+
+        self.assertTrue(assets["par"][self.pulsar_name].endswith(f"{self.pulsar_name}.par"))
+        self.assertEqual(len(assets["tim"][self.pulsar_name]), 1)
+        self.assertTrue(assets["tim"][self.pulsar_name][0].endswith(f"{self.pulsar_name}.tim"))
+
+    def test_collect_assets_omits_par_and_tim_when_reduce_not_approved(self):
+        analysis = self._make_project_analysis()
+        assets = analysis.pipeline.collect_assets()
+        self.assertNotIn("par", assets)
+        self.assertNotIn("tim", assets)
+
+    def _write_noise_report(self, analysis, subject_name, status, **extra):
+        report_dir = Path(analysis.rundir) / "noise" / subject_name
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report = {
+            "pulsar": subject_name, "ntoas": 62,
+            "param_names": [], "posterior_means": [],
+            "status": status,
+        }
+        report.update(extra)
+        (report_dir / "noise_report.yml").write_text(yaml.safe_dump(report))
+        return report
+
+    def test_after_completion_approves_review_on_complete(self):
+        analysis = self._make_project_analysis()
+        self._write_noise_report(analysis, self.pulsar_name, "complete")
+
+        analysis.pipeline.after_completion()
+
+        self.assertEqual(analysis.review.status, "APPROVED")
+        self.assertEqual(len(analysis.review), 1)
+        self.assertEqual(analysis.status, "uploaded")
+
+    def test_after_completion_rejects_review_on_failed(self):
+        analysis = self._make_project_analysis()
+        self._write_noise_report(analysis, self.pulsar_name, "failed")
+
+        analysis.pipeline.after_completion()
+
+        self.assertEqual(analysis.review.status, "REJECTED")
+        self.assertEqual(len(analysis.review), 1)
+
+    def test_after_completion_rejects_when_any_subject_failed(self):
+        for extra_name in ["psrA", "psrB"]:
+            bp_path = os.path.join(self.test_dir, f"{extra_name}.yaml")
+            with open(bp_path, "w") as f:
+                f.write(EVENT_BLUEPRINT.format(name=extra_name))
+            apply_page(file=bp_path, event=None, ledger=self.ledger)
+
+        analysis = self._make_project_analysis(subjects=["psrA", "psrB"])
+        self._write_noise_report(analysis, "psrA", "complete")
+        self._write_noise_report(analysis, "psrB", "failed")
+
+        analysis.pipeline.after_completion()
+
+        self.assertEqual(analysis.review.status, "REJECTED")
+
+    def test_after_completion_without_any_report_leaves_review_untouched(self):
+        analysis = self._make_project_analysis()
+        analysis.pipeline.after_completion()
+        self.assertIsNone(analysis.review.status)
+
+    def test_review_approved_filter_matches_only_approved_analysis(self):
+        # Exercises the real asimov filtering machinery a downstream GWB
+        # search stage relies on (see asimov_ptadata.gwb's module docstring
+        # for why it can't use the standard analyses: mechanism to reach
+        # this - it walks ledger.project_analyses directly instead, but
+        # still needs a real APPROVED/REJECTED review status here to filter
+        # on).
+        completed = self._make_project_analysis(name="noise-complete")
+        self._write_noise_report(completed, self.pulsar_name, "complete")
+        completed.pipeline.after_completion()
+
+        failed = self._make_project_analysis(name="noise-failed")
+        self._write_noise_report(failed, self.pulsar_name, "failed")
+        failed.pipeline.after_completion()
+
+        self.assertTrue(completed.matches_filter(["review"], "approved"))
+        self.assertFalse(failed.matches_filter(["review"], "approved"))
+
 
 if __name__ == "__main__":
     unittest.main()
