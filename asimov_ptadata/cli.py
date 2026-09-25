@@ -61,14 +61,18 @@ def fetch(pulsar, release_root, release_name, cache_dir, outdir):
 @click.option("--tim", "tim_files", required=True, multiple=True, type=click.Path(exists=True, dir_okay=False))
 @click.option("--outdir", required=True, type=click.Path(file_okay=False))
 @click.option("--sigma-threshold", default=5.0, show_default=True)
+@click.option(
+    "--clip/--no-clip", default=True, show_default=True,
+    help="Clip pre-fit residual outliers at --sigma-threshold (see the README's 'Outlier clipping').",
+)
 @click.option("--refit/--no-refit", default=True, show_default=True)
 @click.option("--ephem", default=None)
 @click.option("--bipm-version", default=None)
-def reduce(par_file, tim_files, outdir, sigma_threshold, refit, ephem, bipm_version):
+def reduce(par_file, tim_files, outdir, sigma_threshold, clip, refit, ephem, bipm_version):
     """Validate and reduce TOAs for a single pulsar, writing cleaned data and a QC report."""
     report = reduce_.reduce_pulsar(
         par_file, list(tim_files), outdir,
-        sigma_threshold=sigma_threshold, do_refit=refit,
+        sigma_threshold=sigma_threshold if clip else None, do_refit=refit,
         ephem=ephem, bipm_version=bipm_version,
     )
     click.echo(yaml.safe_dump(report.__dict__, sort_keys=False))
@@ -96,7 +100,7 @@ def run(settings_file):
     staged = fetch_.fetch_pulsar(pulsar, release_root, rundir / "staged")
     report = reduce_.reduce_pulsar(
         staged["par"], staged["tim"], rundir / "reduced",
-        sigma_threshold=reduction.get("sigma threshold", 5.0),
+        sigma_threshold=reduction.get("sigma threshold", 5.0) if reduction.get("clip outliers", True) else None,
         do_refit=reduction.get("refit", True),
         ephem=settings.get("ephemeris"),
         bipm_version=settings.get("bipm version"),

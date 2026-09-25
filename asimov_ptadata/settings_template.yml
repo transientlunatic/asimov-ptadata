@@ -22,3 +22,6 @@ bipm version: {{ production.meta['data']['bipm version'] }}
 reduction:
   sigma threshold: {{ production.meta['reduction']['sigma threshold'] | default: 5.0 }}
   refit: {{ production.meta['reduction']['refit'] | default: true }}
+{%- if production.meta['reduction']['clip outliers'] == false %}
+  clip outliers: false
+{%- endif %}

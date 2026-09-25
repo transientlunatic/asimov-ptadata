@@ -88,8 +88,18 @@ def flag_outliers(toas, model, sigma_threshold=5.0):
     Return (keep_mask, residuals): a robust-sigma mask against the median
     residual, using MAD rather than std so a handful of genuine outliers
     don't inflate the threshold that's meant to catch them.
+
+    These are *pre-fit* residuals of the par file's timing model alone, so
+    any red or DM noise the model doesn't carry (e.g. TempoNest noise
+    parameters, which PINT ignores) is still in them, and its excursions -
+    concentrated at low observing frequency and towards the ends of the
+    data span - get clipped as if they were outliers. ``sigma_threshold=None``
+    disables clipping (every TOA is kept); see the README's "Outlier
+    clipping" section.
     """
     residuals = pint.residuals.Residuals(toas, model)
+    if sigma_threshold is None:
+        return np.ones(toas.ntoas, dtype=bool), residuals
     resids_us = residuals.time_resids.to_value("us")
     median = np.median(resids_us)
     mad = np.median(np.abs(resids_us - median)) * 1.4826
@@ -99,7 +109,13 @@ def flag_outliers(toas, model, sigma_threshold=5.0):
 
 
 def refit(model, toas):
-    """Run a basic weighted least-squares fit, returning the fitter and its post-fit residual RMS in microseconds."""
+    """Run a basic weighted least-squares fit, returning the fitter and its post-fit residual RMS in microseconds.
+
+    Mask parameters (JUMPs, EFACs, ...) that select none of ``toas`` - e.g.
+    a JUMP whose every TOA was clipped as an outlier - are frozen first, as
+    PINT's fitter refuses to fit them.
+    """
+    model.find_empty_masks(toas, freeze=True)
     fitter = pint.fitter.WLSFitter(toas, model)
     fitter.fit_toas()
     rms_us = float(fitter.resids.time_resids.std().to_value("us"))
@@ -113,8 +129,11 @@ def reduce_pulsar(
 
     ``extra_notes`` (e.g. what staging changed in the .tim files) are
     recorded in the QC report's notes; they don't change its status.
+    ``sigma_threshold=None`` disables outlier clipping.
     """
     extra_notes = list(extra_notes or [])
+    if sigma_threshold is None:
+        extra_notes.append("outlier clipping disabled")
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
