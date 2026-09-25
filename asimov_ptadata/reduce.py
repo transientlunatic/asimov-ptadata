@@ -106,8 +106,15 @@ def refit(model, toas):
     return fitter, rms_us
 
 
-def reduce_pulsar(par_file, tim_files, outdir, sigma_threshold=5.0, do_refit=True, ephem=None, bipm_version=None):
-    """Load, validate, and reduce a pulsar's timing data, writing cleaned outputs and a QC report to outdir."""
+def reduce_pulsar(
+    par_file, tim_files, outdir, sigma_threshold=5.0, do_refit=True, ephem=None, bipm_version=None, extra_notes=None
+):
+    """Load, validate, and reduce a pulsar's timing data, writing cleaned outputs and a QC report to outdir.
+
+    ``extra_notes`` (e.g. what staging changed in the .tim files) are
+    recorded in the QC report's notes; they don't change its status.
+    """
+    extra_notes = list(extra_notes or [])
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -126,7 +133,7 @@ def reduce_pulsar(par_file, tim_files, outdir, sigma_threshold=5.0, do_refit=Tru
             backends=[],
             warnings=[],
             status="failed",
-            notes=[f"failed to load model/TOAs: {exc}"],
+            notes=extra_notes + [f"failed to load model/TOAs: {exc}"],
         )
         report.save(outdir / "qc_report.yml")
         return report
@@ -139,7 +146,7 @@ def reduce_pulsar(par_file, tim_files, outdir, sigma_threshold=5.0, do_refit=Tru
     good_toas = toas[keep]
     bad_toas = toas[~keep]
 
-    notes = []
+    notes = extra_notes
     rms_us_refit = None
     if do_refit:
         try:

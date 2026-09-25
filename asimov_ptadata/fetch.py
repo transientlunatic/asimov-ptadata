@@ -19,6 +19,7 @@ breaks array-wide consistency in a combined analysis.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -70,6 +71,106 @@ class ReleaseSource:
         return None
 
 
+_FLAG_NAME = re.compile(r"^-[A-Za-z_]")
+_NUMBER = re.compile(r"^[+-]?(\d+\.?\d*|\.\d+)([eEdD][+-]?\d+)?$")
+
+
+def _is_tempo2_toa(fields):
+    # name freq mjd error site [flags...]
+    return len(fields) >= 5 and all(_NUMBER.match(f) for f in fields[1:4])
+
+
+def normalise_tim_line(line):
+    """Rewrite one tempo2 ``.tim`` line so PINT reads it the way tempo2 does.
+
+    Returns ``(line, commented, dropped_flags)``. See
+    :func:`normalise_tim_files` for the two rules applied.
+    """
+    if line.startswith("C") and len(line) > 1 and not line[1].isspace() and not line.startswith("CC "):
+        return "C " + line, True, []
+
+    fields = line.split()
+    if not _is_tempo2_toa(fields):
+        return line, False, []
+
+    flags = fields[5:]
+    kept, dropped = [], []
+    i = 0
+    while i < len(flags):
+        token = flags[i]
+        if _FLAG_NAME.match(token) and (i + 1 == len(flags) or _FLAG_NAME.match(flags[i + 1])):
+            dropped.append(token)
+            i += 1
+            continue
+        kept.append(token)
+        i += 1
+    if not dropped:
+        return line, False, []
+    ending = line[len(line.rstrip("\r\n")):]
+    return " ".join(fields[:5] + kept) + ending, False, dropped
+
+
+def normalise_tim_files(paths):
+    """Normalise staged tempo2 ``.tim`` files in place for PINT.
+
+    Two tempo2 conventions that real releases (IPTA DR2 in particular) rely
+    on are read differently by PINT, so they are rewritten in the *staged*
+    copies - never in the release checkout itself:
+
+    - **Commented-out TOAs.** tempo2 treats any line whose first character
+      is an upper-case ``C`` as a comment, and releases comment out a TOA
+      by prefixing it directly (``C???? c015621.align...``,
+      ``Cc054887.align...``, ``C200404522.bb ...``). PINT only recognises
+      ``C ``, ``c ``, ``CC `` and ``#`` as comments, so it either reads such
+      a line as a real TOA (silently re-including data the release
+      removed) or fails to parse it. Such lines get a ``"C "`` prefix. A
+      lower-case ``c`` is *not* a comment to tempo2 - it is the first
+      letter of many archive file names - and is left alone.
+    - **Flags with no value** (``... -projid -beconfig -snr 70.99``). tempo2
+      accepts a flag followed directly by another flag or the end of the
+      line; PINT pairs flag tokens strictly two by two, so it silently
+      assigns the next flag's *name* as the value (and, with an odd number
+      of them, shifts every later flag, or fails to parse). A valueless
+      flag carries no information, so it is dropped.
+
+    Both behaviours were checked against tempo2 itself. Only lines that
+    need it are rewritten. Returns a dict with the number of TOAs commented
+    out and valueless flags dropped, and the files changed.
+    """
+    summary = {"commented TOAs": 0, "valueless flags dropped": 0, "files changed": []}
+    for path in paths:
+        path = Path(path)
+        # latin-1 round-trips any byte, so nothing else in the file changes.
+        with open(path, encoding="latin-1", newline="") as f:
+            lines = f.readlines()
+        changed = False
+        for i, line in enumerate(lines):
+            new, commented, dropped = normalise_tim_line(line)
+            if new != line:
+                lines[i] = new
+                changed = True
+                summary["commented TOAs"] += int(commented)
+                summary["valueless flags dropped"] += len(dropped)
+        if changed:
+            with open(path, "w", encoding="latin-1", newline="") as f:
+                f.writelines(lines)
+            summary["files changed"].append(path)
+    return summary
+
+
+def normalisation_notes(summary):
+    """QC-report notes describing what :func:`normalise_tim_files` changed."""
+    notes = []
+    if summary["commented TOAs"]:
+        notes.append(
+            f"{summary['commented TOAs']} TOA line(s) commented out tempo2-style (C prefix) "
+            "were rewritten as PINT comments while staging"
+        )
+    if summary["valueless flags dropped"]:
+        notes.append(f"{summary['valueless flags dropped']} valueless TOA flag(s) were dropped while staging")
+    return notes
+
+
 def _copy_into(src, outdir):
     dst = outdir / src.name
     shutil.copy2(src, dst)
@@ -114,8 +215,9 @@ def fetch_pulsar(psr_name, release_root, outdir):
     """Stage a pulsar's par/tim/clock files from a release checkout into outdir.
 
     Returns a manifest dict with keys "par" (the selected file), "par
-    candidates" (all matches found), "tim" (list) and, if present, "clock
-    dir".
+    candidates" (all matches found), "tim" (list), "tim normalisation" (the
+    summary from :func:`normalise_tim_files`, which has been applied to
+    every staged .tim file) and, if present, "clock dir".
     """
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -130,15 +232,19 @@ def fetch_pulsar(psr_name, release_root, outdir):
         shutil.copytree(psr_dir, dest, dirs_exist_ok=True)
         par_candidates = source.par_candidates(dest, psr_name)
         tim_candidates = source.tim_candidates(dest, psr_name)
+        # INCLUDEd per-backend files hold the TOAs, so normalise every one.
+        staged_tims = sorted(dest.rglob("*.tim"))
     else:
         # Flat layout: no per-pulsar directory, so copy the matched files individually.
         par_candidates = [_copy_into(p, outdir) for p in source.par_candidates(source.release_root, psr_name)]
         tim_candidates = [_copy_into(p, outdir) for p in source.tim_candidates(source.release_root, psr_name)]
+        staged_tims = tim_candidates
 
     manifest = {
         "par": _select_par(par_candidates),
         "par candidates": par_candidates,
         "tim": tim_candidates,
+        "tim normalisation": normalise_tim_files(staged_tims),
     }
 
     clock_dir = source.clock_dir()

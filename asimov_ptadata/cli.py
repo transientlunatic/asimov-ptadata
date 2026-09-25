@@ -100,6 +100,7 @@ def run(settings_file):
         do_refit=reduction.get("refit", True),
         ephem=settings.get("ephemeris"),
         bipm_version=settings.get("bipm version"),
+        extra_notes=fetch_.normalisation_notes(staged["tim normalisation"]),
     )
     click.echo(f"ptadata run complete for {pulsar}: status={report.status}")
     if report.status != "pass":
