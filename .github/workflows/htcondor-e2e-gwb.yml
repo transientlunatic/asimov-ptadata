@@ -40,7 +40,10 @@ jobs:
     name: "ptadata-gwb via asimov on HTCondor"
     runs-on: ubuntu-latest
     container:
-      image: htcondor/mini:latest
+      # Pinned together: the htcondor Python bindings asimov submits through
+      # must match the schedd in this image, or submission fails with
+      # AUTHENTICATE:1003. Bump both at once.
+      image: htcondor/mini:25.13.2-el9
       options: --privileged
     defaults:
       run:
@@ -83,7 +86,7 @@ jobs:
           # ptadata-noise does, no extra packages beyond that (see
           # pyproject.toml: gp_signals/utils are already part of
           # enterprise-pulsar).
-          extra-packages: "asimov>=0.7 enterprise-pulsar ptmcmcsampler"
+          extra-packages: "asimov>=0.7 htcondor==25.13.2 enterprise-pulsar ptmcmcsampler"
 
       - name: Set up git
         run: |

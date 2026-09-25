@@ -33,7 +33,10 @@ jobs:
     name: "ptadata-noise via asimov on HTCondor"
     runs-on: ubuntu-latest
     container:
-      image: htcondor/mini:latest
+      # Pinned together: the htcondor Python bindings asimov submits through
+      # must match the schedd in this image, or submission fails with
+      # AUTHENTICATE:1003. Bump both at once.
+      image: htcondor/mini:25.13.2-el9
       options: --privileged
     defaults:
       run:
@@ -87,7 +90,7 @@ jobs:
           # (see asimov_ptadata/noise_fit.py), avoiding its
           # healpy/scikit-learn dependency chain for a model that doesn't
           # need it.
-          extra-packages: "asimov>=0.7 enterprise-pulsar ptmcmcsampler"
+          extra-packages: "asimov>=0.7 htcondor==25.13.2 enterprise-pulsar ptmcmcsampler"
 
       - name: Set up git
         run: |
