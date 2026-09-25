@@ -46,13 +46,30 @@ FIXTURE_PULSARS = {
     "J1028-5819": "J1028-5819-example",
 }
 
-# Fixed per-pulsar noise values this smoke test holds constant, standing in
+# Fixed per-pulsar noise_params this smoke test holds constant, standing in
 # for Phase 1 (`ptadata-noise`) posterior means - plausible values in the
 # same ranges noise_fit.py samples over, not fit results from a real
 # noise-fit run (this script only exercises the GWB stage in isolation).
+# Bare "efac"/"log10_t2equad" (no backend-suffixed keys) here because
+# neither fixture .par/.tim carries any backend-identifying flags
+# (fe/be/f/i/sys/g/group) - enterprise's own `backend_flags` (see
+# noise_fit.py's docstring) falls back to a single empty-string backend for
+# every TOA in that case, and `selections.by_backend`'s naming convention
+# (enterprise/signals/selections.py's `Selection.__call__`) omits the
+# (empty) key from the parameter name entirely rather than using it as a
+# literal prefix - confirmed directly against these two fixture files while
+# updating this script for per-backend/ECORR/DM-noise support.
 FIXED_NOISE = {
-    "1748-2021E": {"efac": 1.1, "log10_t2equad": -7.0, "red_noise_gamma": 3.5, "red_noise_log10_A": -14.0},
-    "J1028-5819": {"efac": 0.9, "log10_t2equad": -7.5, "red_noise_gamma": 2.8, "red_noise_log10_A": -14.5},
+    "1748-2021E": {
+        "efac": 1.1, "log10_t2equad": -7.0, "log10_ecorr": -7.2,
+        "red_noise_gamma": 3.5, "red_noise_log10_A": -14.0,
+        "dm_gp_gamma": 2.1, "dm_gp_log10_A": -13.5,
+    },
+    "J1028-5819": {
+        "efac": 0.9, "log10_t2equad": -7.5, "log10_ecorr": -7.6,
+        "red_noise_gamma": 2.8, "red_noise_log10_A": -14.5,
+        "dm_gp_gamma": 1.8, "dm_gp_log10_A": -13.8,
+    },
 }
 
 
@@ -106,7 +123,7 @@ def main():
         tim = workdir / f"{name}.tim"
         shutil.copy(pint.config.examplefile(f"{stem}.par"), par)
         shutil.copy(pint.config.examplefile(f"{stem}.tim"), tim)
-        pulsars.append({"name": name, "par": str(par), "tim": [str(tim)], **FIXED_NOISE[name]})
+        pulsars.append({"name": name, "par": str(par), "tim": [str(tim)], "noise_params": FIXED_NOISE[name]})
 
     outdir = workdir / "gwb"
     print(f"\nRunning a real {len(pulsars)}-pulsar joint fixed-noise GWB fit in {outdir} ...")

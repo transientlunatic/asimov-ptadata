@@ -1,10 +1,15 @@
 """Single-pulsar Bayesian noise fitting: enterprise + PINT + PTMCMCSampler.
 
-Phase 1 walking-skeleton scope: an independent white-noise (EFAC + t2equad)
-plus power-law red-noise model *per pulsar*. There is deliberately no
+Phase 1 scope: a marginalised timing model, per-backend white noise (EFAC +
+t2equad, plus optional ECORR), achromatic power-law red noise, and optional
+chromatic (DM) power-law noise - all *per pulsar*. There is deliberately no
 cross-pulsar common process / gravitational-wave-background signal here -
 that's future-phase scope (see the ``asimov_ptadata.noise`` module
-docstring).
+docstring). This noise model matters beyond just Phase 1 itself: the
+downstream common-process search this feeds (a shared cubic-in-time signal
+across the array, i.e. the jerk of the Solar-System barycentre) can only be
+told apart from a pulsar's own timing-model/red/DM noise if those are
+modelled - and marginalised - properly first.
 
 This mirrors ``asimov_ptadata.reduce``'s split between "real science logic"
 (this module) and "Asimov plumbing" (``asimov_ptadata.noise``): nothing here
@@ -29,6 +34,89 @@ Timing backend
 so this never depends on ``libstempo`` (not installed, and not part of this
 project's dependency stack - ``pint-pulsar`` is already a base dependency of
 ``asimov-ptadata`` via the reduce pipeline).
+
+Timing-model marginalisation
+------------------------------
+``gp_signals.TimingModel(use_svd=True)`` projects the pulsar's own
+timing-model design matrix (phase/F0/F1/... - a constant, a linear, and a
+quadratic term in time, plus whatever else the ``.par`` file fits for) out
+of the likelihood analytically, as an infinite-variance Gaussian process
+rather than a set of free parameters to sample. ``use_svd=True`` asks
+enterprise to orthogonalise that design matrix via its SVD before use - the
+``enterprise`` docstring (``gp_signals.TimingModel``) recommends this "for
+better conditioning", and it costs nothing extra here (the design matrix is
+tiny compared to the number of TOAs). This is what makes the array-wide
+cubic-in-time (jerk) search this pipeline feeds meaningful: without it, a
+shared cubic signal would be partially degenerate with, and could leak into,
+each pulsar's own unmodelled quadratic (F1) spin-down term.
+
+Per-backend white noise, and how enterprise derives "backend" from an IPTA
+DR2-style ``.tim`` file
+---------------------------------------------------------------------------
+White noise (EFAC, t2equad, and ECORR) is fit **per backend/receiver
+combination**, not once per pulsar, using
+``selections.Selection(selections.by_backend)``. This is the standard IPTA
+practice (different backends have different systematics), and it matters
+here specifically because the downstream GWB/jerk search holds these values
+fixed: a single averaged-over-backends EFAC would bias the *fixed* per-pulsar
+noise level the common-process fit is built on top of, in a way that could
+itself imitate or mask a shared low-frequency signal.
+
+What "backend" means here is entirely enterprise's own call, not something
+this module decides - read directly from
+``enterprise.pulsar.BasePulsar.backend_flags`` (``enterprise/pulsar.py``,
+confirmed against the installed ``enterprise-pulsar`` package rather than
+assumed): it builds an array of per-TOA backend labels by trying tim-file
+flags in *ascending* priority ``fe``+``be`` (combined as ``"fe_be"``), then
+``f``, then ``i``, then ``sys``, then ``g``, then ``group`` - each later flag
+in that list, if present on a TOA, *overwrites* whatever an earlier one set,
+so ``-group`` (if present) wins over everything else, then ``-g``, then
+``-sys``, then ``-i``, then ``-f``, and only TOAs with none of those fall
+back to a plain ``"<fe>_<be>"`` combination. IPTA DR2-style ``.tim`` files
+typically carry both a ``-group`` flag (e.g. ``PuppiL-wide``) and an
+``-f``/``-fe``/``-be`` triple; per the priority above, ``-group`` is what
+``selections.by_backend`` actually splits on for that data - the finer
+``-f`` receiver/backend combination is *not* what gets used for those TOAs,
+which is worth being explicit about since it's not obvious from the flag
+names alone. ``selections.by_backend`` itself (``enterprise/signals/
+selections.py``) is a thin wrapper: it just groups TOA indices by the
+unique values of whatever ``backend_flags`` returns.
+
+ECORR (optional, default on)
+------------------------------
+``white_signals.EcorrKernelNoise`` (also per backend, via the same
+selection) models the correlated jitter/scintillation noise between TOAs
+from the same observing epoch - real for high-cadence, multi-frequency
+backends, and, like EFAC/t2equad, another per-backend noise term that would
+bias the fixed noise level handed to the GWB/jerk search if omitted where
+it's actually present in the data. Made optional (``use_ecorr``, default
+``True``) since not every backend/receiver combination in every data set
+actually needs it (e.g. single-TOA-per-epoch backends), and forcing it on
+for those can make the sampler work to constrain an unconstrained parameter
+for no benefit.
+
+DM (chromatic) red noise (optional, default on)
+---------------------------------------------------
+A second power-law Fourier-basis GP, built directly from
+``gp_signals.BasisGP`` with ``utils.createfourierdesignmatrix_dm`` as its
+basis function (rather than the achromatic
+``utils.createfourierdesignmatrix_red`` basis ``gp_signals.FourierBasisGP``
+hard-codes) - confirmed directly against the installed ``enterprise-pulsar``
+source (``enterprise/signals/gp_bases.py``): ``createfourierdesignmatrix_dm``
+is already an ``@parameter.function``-wrapped callable exactly like the
+achromatic basis function ``FourierBasisGP`` uses internally, it just scales
+each Fourier column by ``(fref / freqs) ** 2`` to make the basis
+frequency-dependent (chromatic, as DM delays are) rather than
+frequency-independent. ``gp_signals.BasisGP`` (the generic building block
+``FourierBasisGP`` itself is implemented on top of) takes that basis function
+directly, so no other enterprise machinery is needed. This matters for the
+same reason DM noise always matters in a real PTA analysis: uncorrected
+interstellar-medium DM variations are strongly time-correlated and
+frequency-dependent, and can otherwise leak into (or be confused with) both
+the achromatic red-noise model and, more importantly for this pipeline, a
+shared low-frequency common process. Made optional (``use_dm_noise``,
+default ``True``) for narrowband/DM-insensitive data sets where it isn't
+identifiable and would just waste sampler time.
 """
 
 from __future__ import annotations
@@ -57,11 +145,125 @@ class NoiseFitReport:
             yaml.safe_dump(dataclasses.asdict(self), f, sort_keys=False)
 
 
-def _build_pta(par_file, tim_files, red_noise_components=10):
+def _build_noise_model(
+    red_noise_components=10,
+    dm_noise_components=10,
+    use_ecorr=True,
+    use_dm_noise=True,
+    fixed=False,
+    selection_fn=None,
+):
     """
-    Build a real, minimal single-pulsar ``enterprise`` PTA likelihood:
-    EFAC + t2equad white noise, plus a power-law Fourier-basis GP for red
-    noise. No common/GWB process - single-pulsar scope only.
+    Build the per-pulsar signal model shared by every pulsar in both the
+    single-pulsar noise fit (``_build_pta``, ``fixed=False``, every
+    parameter a real prior) and the fixed-noise GWB/jerk search
+    (``asimov_ptadata.gwb_fit._build_joint_pta``, ``fixed=True``, every
+    parameter a non-sampled ``parameter.Constant``): the marginalised
+    timing model, per-backend white noise (+ optional ECORR), achromatic
+    red noise, and optional DM noise - see this module's docstring for why
+    each piece is there. Returns a *signal model*, not yet applied to a
+    pulsar - call the result with a pulsar (``model(psr)``) to get that
+    pulsar's ``SignalCollection``, exactly like any other ``enterprise``
+    signal sum.
+
+    When ``fixed=True``, every noise parameter here is built as
+    ``parameter.Constant()`` with no value - the caller is expected to fill
+    those in afterwards via ``signal_base.PTA.set_default_params()`` (keyed
+    by the model's own full parameter names, e.g.
+    ``"<psr>_<backend>_efac"``), rather than baking per-backend fixed values
+    into this function's signature. This is deliberate, not incidental:
+    building one ``parameter.Constant(value)`` *per backend* and combining
+    those into one ``white_signals.MeasurementNoise``/``EcorrKernelNoise``
+    signal per backend (rather than the single selection-covering-every-key
+    signal built here) was tried first and produces a ``TypeError`` deep in
+    ``enterprise.signals.signal_base.ConstantParameter._solve_D1`` (a
+    ``float / ShermanMorrison`` operand-type error) as soon as more than one
+    backend's ECORR is present - confirmed directly while building this.
+    ``set_default_params`` avoids that entirely by keeping exactly the same
+    single-signal-per-selection structure the free/sampled case uses,
+    differing only in which parameter *class* (``Uniform`` vs ``Constant``)
+    it's built from.
+
+    Parameters
+    ----------
+    red_noise_components, dm_noise_components : int
+        Number of Fourier components for the achromatic red-noise and
+        (if enabled) DM-noise GPs, respectively.
+    use_ecorr : bool
+        Whether to include per-backend ECORR (``white_signals.
+        EcorrKernelNoise``).
+    use_dm_noise : bool
+        Whether to include the chromatic DM-noise GP.
+    fixed : bool
+        ``False`` (default): every noise parameter is a real ``Uniform``
+        prior, to be sampled. ``True``: every noise parameter is an
+        unset ``parameter.Constant()``, to be filled in by the caller via
+        ``PTA.set_default_params()``.
+    selection_fn : callable, optional
+        The backend-selection function passed to
+        ``selections.Selection(...)`` for the white-noise/ECORR signals.
+        Defaults to ``selections.by_backend`` (see this module's docstring
+        for exactly how that derives "backend" from a pulsar's tim-file
+        flags). Overridable so ``gwb_fit._build_joint_pta`` can fall back to
+        ``selections.no_selection`` for a *legacy* fixed-noise dict that
+        predates per-backend noise support (see that module's docstring).
+
+    Returns
+    -------
+    An enterprise signal model - the sum of ``gp_signals.TimingModel`` and
+    the white/red/DM noise signals described above.
+    """
+    from enterprise.signals import gp_priors, gp_signals, parameter, selections, white_signals
+
+    if selection_fn is None:
+        selection_fn = selections.by_backend
+    selection = selections.Selection(selection_fn)
+
+    def _param(lo, hi):
+        return parameter.Constant() if fixed else parameter.Uniform(lo, hi)
+
+    model = gp_signals.TimingModel(use_svd=True)
+
+    efac = _param(0.1, 5.0)
+    log10_t2equad = _param(-10, -5)
+    model += white_signals.MeasurementNoise(efac=efac, log10_t2equad=log10_t2equad, selection=selection)
+
+    if use_ecorr:
+        log10_ecorr = _param(-10, -5)
+        model += white_signals.EcorrKernelNoise(log10_ecorr=log10_ecorr, selection=selection)
+
+    log10_A = _param(-20, -11)
+    gamma = _param(0, 7)
+    powerlaw = gp_priors.powerlaw(log10_A=log10_A, gamma=gamma)
+    model += gp_signals.FourierBasisGP(powerlaw, components=red_noise_components)
+
+    if use_dm_noise:
+        from enterprise.signals import utils
+
+        log10_A_dm = _param(-20, -11)
+        gamma_dm = _param(0, 7)
+        dm_powerlaw = gp_priors.powerlaw(log10_A=log10_A_dm, gamma=gamma_dm)
+        dm_basis = utils.createfourierdesignmatrix_dm(nmodes=dm_noise_components)
+        model += gp_signals.BasisGP(dm_powerlaw, dm_basis, name="dm_gp")
+
+    return model
+
+
+def _build_pta(
+    par_file,
+    tim_files,
+    red_noise_components=10,
+    dm_noise_components=10,
+    use_ecorr=True,
+    use_dm_noise=True,
+):
+    """
+    Build a real, single-pulsar ``enterprise`` PTA likelihood: a
+    marginalised timing model, per-backend EFAC + t2equad white noise
+    (+ optional ECORR), a power-law Fourier-basis GP for achromatic red
+    noise, and (optionally) a chromatic power-law GP for DM noise. No
+    common/GWB process - single-pulsar scope only. See this module's
+    docstring for the reasoning behind each piece.
 
     Parameters
     ----------
@@ -69,33 +271,33 @@ def _build_pta(par_file, tim_files, red_noise_components=10):
         Path to the (already QC'd) timing model.
     tim_files : str, Path, or list of these
         Path(s) to the (already QC'd) TOA file(s).
-    red_noise_components : int
-        Number of Fourier components for the red-noise GP.
+    red_noise_components, dm_noise_components : int
+        Number of Fourier components for the red-noise and (if enabled)
+        DM-noise GPs.
+    use_ecorr : bool
+        Whether to include per-backend ECORR.
+    use_dm_noise : bool
+        Whether to include the chromatic DM-noise GP.
 
     Returns
     -------
     (enterprise.pulsar.Pulsar, enterprise.signals.signal_base.PTA)
     """
     from enterprise.pulsar import Pulsar
-    from enterprise.signals import gp_priors, gp_signals, parameter, selections, signal_base, white_signals
+    from enterprise.signals import signal_base
 
     tim_files = [tim_files] if isinstance(tim_files, (str, Path)) else list(tim_files)
     tim_arg = [str(t) for t in tim_files] if len(tim_files) > 1 else str(tim_files[0])
 
     psr = Pulsar(str(par_file), tim_arg, timing_package="pint")
 
-    selection = selections.Selection(selections.no_selection)
-
-    efac = parameter.Uniform(0.1, 5.0)
-    log10_t2equad = parameter.Uniform(-10, -5)
-    white = white_signals.MeasurementNoise(efac=efac, log10_t2equad=log10_t2equad, selection=selection)
-
-    log10_A = parameter.Uniform(-20, -11)
-    gamma = parameter.Uniform(0, 7)
-    powerlaw = gp_priors.powerlaw(log10_A=log10_A, gamma=gamma)
-    red_noise = gp_signals.FourierBasisGP(powerlaw, components=red_noise_components)
-
-    model = white + red_noise
+    model = _build_noise_model(
+        red_noise_components=red_noise_components,
+        dm_noise_components=dm_noise_components,
+        use_ecorr=use_ecorr,
+        use_dm_noise=use_dm_noise,
+        fixed=False,
+    )
     pta = signal_base.PTA([model(psr)])
     return psr, pta
 
@@ -108,6 +310,9 @@ def run_noise_fit(
     burn=1000,
     cov_update=None,
     red_noise_components=10,
+    dm_noise_components=10,
+    use_ecorr=True,
+    use_dm_noise=True,
     seed=None,
 ):
     """
@@ -132,8 +337,12 @@ def run_noise_fit(
         AM-proposal buffer is sized from ``covUpdate``, its DE-jump buffer
         from ``burn``, and ``_updateDEbuffer`` assumes the two match) -
         confirmed the hard way while building this pipeline.
-    red_noise_components : int
-        Number of red-noise Fourier components.
+    red_noise_components, dm_noise_components : int
+        Number of red-noise / (if enabled) DM-noise Fourier components.
+    use_ecorr : bool
+        Whether to include per-backend ECORR (default ``True``).
+    use_dm_noise : bool
+        Whether to include the chromatic DM-noise GP (default ``True``).
     seed : int, optional
         Seed for the initial-sample RNG, for reproducibility.
 
@@ -171,7 +380,14 @@ def run_noise_fit(
     notes = []
 
     try:
-        psr, pta = _build_pta(par_file, tim_files, red_noise_components=red_noise_components)
+        psr, pta = _build_pta(
+            par_file,
+            tim_files,
+            red_noise_components=red_noise_components,
+            dm_noise_components=dm_noise_components,
+            use_ecorr=use_ecorr,
+            use_dm_noise=use_dm_noise,
+        )
     except Exception as exc:
         report = NoiseFitReport(
             pulsar=pulsar_name,

@@ -143,16 +143,23 @@ class GWBPipelineTests(unittest.TestCase):
 
         report_dir = Path(analysis.rundir) / "noise" / subject_name
         report_dir.mkdir(parents=True, exist_ok=True)
+        # Deliberately more than the old fixed four-key shape - a per-backend
+        # name (with an ECORR alongside it) plus DM noise - to exercise the
+        # generalised "carry every noise_params key" resolution rather than
+        # a hard-coded FIXED_NOISE_PARAMS set (see gwb_fit.py's docstring).
         report = {
             "pulsar": subject_name,
             "ntoas": 60,
             "param_names": [
-                f"{subject_name}_efac",
-                f"{subject_name}_log10_t2equad",
+                f"{subject_name}_430_ASP_efac",
+                f"{subject_name}_430_ASP_log10_t2equad",
+                f"{subject_name}_430_ASP_log10_ecorr",
                 f"{subject_name}_red_noise_gamma",
                 f"{subject_name}_red_noise_log10_A",
+                f"{subject_name}_dm_gp_gamma",
+                f"{subject_name}_dm_gp_log10_A",
             ],
-            "posterior_means": [1.1, -7.0, 3.5, -14.0],
+            "posterior_means": [1.1, -7.0, -7.2, 3.5, -14.0, 2.1, -13.5],
             "status": noise_status,
         }
         (report_dir / "noise_report.yml").write_text(yaml.safe_dump(report))
@@ -227,10 +234,14 @@ class GWBPipelineTests(unittest.TestCase):
             self.assertEqual(entry["name"], name)
             self.assertTrue(entry["par"].endswith(f"{name}.par"))
             self.assertTrue(any(t.endswith(f"{name}.tim") for t in entry["tim"]))
-            self.assertEqual(entry["efac"], 1.1)
-            self.assertEqual(entry["log10_t2equad"], -7.0)
-            self.assertEqual(entry["red_noise_gamma"], 3.5)
-            self.assertEqual(entry["red_noise_log10_A"], -14.0)
+            noise_params = entry["noise_params"]
+            self.assertEqual(noise_params["430_ASP_efac"], 1.1)
+            self.assertEqual(noise_params["430_ASP_log10_t2equad"], -7.0)
+            self.assertEqual(noise_params["430_ASP_log10_ecorr"], -7.2)
+            self.assertEqual(noise_params["red_noise_gamma"], 3.5)
+            self.assertEqual(noise_params["red_noise_log10_A"], -14.0)
+            self.assertEqual(noise_params["dm_gp_gamma"], 2.1)
+            self.assertEqual(noise_params["dm_gp_log10_A"], -13.5)
 
     def test_resolve_subject_data_raises_when_noise_fit_not_approved(self):
         self._make_reduce_production("1748-2021E")
