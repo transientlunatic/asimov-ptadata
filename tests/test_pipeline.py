@@ -142,6 +142,15 @@ class PtadataPipelineTests(unittest.TestCase):
 
         self.assertEqual(production.job_id, 12345)
 
+    def test_build_dag_passes_the_job_environment(self):
+        production = self._make_production(scheduler={"environment": {"PINT_CLOCK_OVERRIDE": "/c/clock", "XDG_CACHE_HOME": "/c/astropy"}})
+        production.pipeline._scheduler = MagicMock()
+        production.pipeline._scheduler.submit = MagicMock(return_value=1)
+        production.pipeline.build_dag(dryrun=False)
+        job = production.pipeline._scheduler.submit.call_args[0][0]
+        self.assertEqual(job.kwargs["environment"], '"PINT_CLOCK_OVERRIDE=/c/clock XDG_CACHE_HOME=/c/astropy"')
+        self.assertEqual(job.to_htcondor()["environment"], job.kwargs["environment"])
+
     def test_build_dag_supplies_accounting_group_when_configured(self):
         production = self._make_production(scheduler={"accounting group": "dept.pta.test"})
         production.pipeline._scheduler = MagicMock()

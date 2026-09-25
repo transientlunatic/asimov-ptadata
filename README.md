@@ -92,3 +92,14 @@ selector for releases that ship parallel data combinations (IPTA DR2 has
 pre-staging clock correction files for HPC worker nodes without outbound
 internet access (PINT will otherwise try to fetch missing clock files from
 the IPTA clock-corrections repository on first use).
+
+For such nodes, each pipeline passes a `scheduler: environment:` mapping in
+its metadata to the job (HTCondor's `environment`, or Slurm's `--export`),
+so jobs can be pointed at clock files and ephemerides staged elsewhere, e.g.:
+
+```yaml
+scheduler:
+  environment:
+    PINT_CLOCK_OVERRIDE: /shared/cache/clock
+    XDG_CACHE_HOME: /shared/cache/astropy_cache_home
+```
