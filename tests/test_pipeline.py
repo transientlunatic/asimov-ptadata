@@ -143,6 +143,22 @@ class PtadataPipelineTests(unittest.TestCase):
 
         self.assertEqual(production.job_id, 12345)
 
+    def _rendered_reduction(self, production):
+        path = os.path.join(self.test_dir, f"{production.name}.ini")
+        production.make_config(path)
+        with open(path) as f:
+            return yaml.safe_load(f)["reduction"]
+
+    def test_settings_keep_clipping_on_by_default(self):
+        reduction = self._rendered_reduction(self._make_production())
+        self.assertEqual(reduction["sigma threshold"], 5.0)
+        self.assertNotIn("clip outliers", reduction)
+
+    def test_settings_pass_clip_outliers_false_through(self):
+        # Liquid's `default` filter would turn a plain `false` back into the default.
+        production = self._make_production(reduction={"sigma threshold": 5.0, "refit": True, "clip outliers": False})
+        self.assertIs(self._rendered_reduction(production)["clip outliers"], False)
+
     def test_build_dag_alone_does_not_submit(self):
         production = self._make_production()
         production.pipeline._scheduler = MagicMock()

@@ -69,6 +69,33 @@ lines with valueless flags in 17 pulsars are affected. `fetch`'s manifest
 records what was changed under `tim normalisation`, and `ptadata run`
 copies it into the QC report's `notes` (it doesn't change the QC status).
 
+### Outlier clipping
+
+By default `reduce` moves TOAs whose residual lies more than `sigma
+threshold` (5.0) robust standard deviations (MAD-based) from the median into
+a `.quarantine.tim` file. These are **pre-fit** residuals of the par file's
+timing model alone. Any red or DM noise that model doesn't carry is still in
+them, and its excursions get clipped as if they were bad TOAs. That includes
+IPTA DR2's TempoNest noise parameters (`TNSUBTRACTDM`, `TNRedAmp`, ...),
+which PINT ignores. Those excursions are concentrated at low observing
+frequency and towards the ends of the data span.
+
+For IPTA DR2 this removed 8.9% of J1713+0747's TOAs: 725 of 4020 at 800 MHz
+(GUPPI), and 14.6% of the earliest fifth of the span against 3.3% of the
+middle fifth. That would bias any analysis sensitive to low-frequency or
+long-timescale structure: noise fits, and common-signal searches such as a
+GWB or a secular trend. For a release that has already been cleaned by its
+collaboration, turn clipping off and leave the noise to the noise model:
+
+```yaml
+reduction:
+  clip outliers: false   # or `ptadata reduce --no-clip`
+```
+
+The QC report then notes `outlier clipping disabled` and flags no TOAs.
+When clipping is on and removes every TOA a JUMP (or other mask parameter)
+selects, the refit now freezes that parameter instead of failing.
+
 ## As an Asimov pipeline
 
 Installing with the `asimov` extra (`pip install asimov-ptadata[asimov]`)
@@ -85,6 +112,7 @@ data:
 reduction:
   sigma threshold: 5.0
   refit: true
+  clip outliers: true   # see "Outlier clipping" above
 ```
 
 The plugin submits a single `ptadata run --settings <file>` job through
