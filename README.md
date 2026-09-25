@@ -42,7 +42,7 @@ one that fails).
 
 ### Normalisation of staged `.tim` files
 
-tempo2 and PINT read two `.tim`-file conventions differently, and IPTA DR2
+tempo2 and PINT read three `.tim`-file conventions differently, and IPTA DR2
 relies on both, so `fetch` rewrites them in the **staged copies** (every
 `.tim` file, including `INCLUDE`d per-backend files). The release checkout
 itself is never modified.
@@ -60,11 +60,21 @@ itself is never modified.
   the next flag's name as the value, and with an odd number of them it
   shifts every later flag or fails to parse (J1824-2452A, J2033+1734). A
   valueless flag carries no information, so it is dropped.
+- **`-addsat` arrival-time corrections** (`... -addsat -1`). tempo2 adds
+  the flag's value, in seconds, to the site arrival time. DR2 uses it on 39
+  active Effelsberg TOAs in 17 pulsars (+1, -1 or -2 s) to correct
+  timestamp errors. PINT
+  ignores it, so those TOAs are a second out, which shows up as residuals of
+  up to half a pulse period (1.8 ms for J1744-1134, raising its post-fit
+  RMS from 2.7 to 30.6 µs). It is replaced with PINT's `-to` time offset
+  (seconds, applied with the clock corrections), summed with any `-to`
+  already on the line.
 
-Both rules were checked against tempo2 itself: after normalisation PINT
+All three rules were checked against tempo2 itself: after normalisation PINT
 loads exactly as many TOAs as tempo2 does from the original files for
 J1713+0747 (17487), J1744-1134 (9834), J1824-2452A (276) and J2033+1734
-(194). Across DR2 VersionB, 203 commented TOAs in 18 pulsars and 2587
+(194), and a converted `-addsat -1` moves a TOA by exactly the 1.0000 s
+tempo2 moves it. Across DR2 VersionB, 203 commented TOAs in 18 pulsars and 2587
 lines with valueless flags in 17 pulsars are affected. `fetch`'s manifest
 records what was changed under `tim normalisation`, and `ptadata run`
 copies it into the QC report's `notes` (it doesn't change the QC status).
