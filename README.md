@@ -40,6 +40,35 @@ all of them and `"par"` prefers a TDB-convention file, since PINT refuses to
 load `UNITS TCB` par files outright (the plainer-looking filename may be the
 one that fails).
 
+### Normalisation of staged `.tim` files
+
+tempo2 and PINT read two `.tim`-file conventions differently, and IPTA DR2
+relies on both, so `fetch` rewrites them in the **staged copies** (every
+`.tim` file, including `INCLUDE`d per-backend files). The release checkout
+itself is never modified.
+
+- **TOAs commented out with a `C` prefix.** tempo2 treats any line starting
+  with an upper-case `C` as a comment, and DR2 comments out TOAs by
+  prefixing them directly (`C???? c015621.align...`, `Cc054887.align...`,
+  `C200404522.bb ...`). PINT only recognises `C `, `c `, `CC ` and `#`, so
+  it either silently re-includes the TOA (J1713+0747 had 7 of these) or
+  fails to parse the file (J1744-1134). These lines are prefixed with
+  `C ` so PINT reads them as comments too. A lower-case `c` is left alone:
+  to tempo2 it's an ordinary TOA whose archive name starts with "c".
+- **Flags with no value** (`... -projid -beconfig -snr 70.99`). tempo2
+  accepts these; PINT pairs flag tokens two at a time, so it silently takes
+  the next flag's name as the value, and with an odd number of them it
+  shifts every later flag or fails to parse (J1824-2452A, J2033+1734). A
+  valueless flag carries no information, so it is dropped.
+
+Both rules were checked against tempo2 itself: after normalisation PINT
+loads exactly as many TOAs as tempo2 does from the original files for
+J1713+0747 (17487), J1744-1134 (9834), J1824-2452A (276) and J2033+1734
+(194). Across DR2 VersionB, 203 commented TOAs in 18 pulsars and 2587
+lines with valueless flags in 17 pulsars are affected. `fetch`'s manifest
+records what was changed under `tim normalisation`, and `ptadata run`
+copies it into the QC report's `notes` (it doesn't change the QC status).
+
 ## As an Asimov pipeline
 
 Installing with the `asimov` extra (`pip install asimov-ptadata[asimov]`)

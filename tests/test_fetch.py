@@ -1,6 +1,12 @@
 import pytest
 
-from asimov_ptadata.fetch import ReleaseNotFoundError, ReleaseSource, fetch_pulsar
+from asimov_ptadata.fetch import (
+    ReleaseNotFoundError,
+    ReleaseSource,
+    fetch_pulsar,
+    normalisation_notes,
+    normalise_tim_line,
+)
 
 
 @pytest.fixture
@@ -115,3 +121,84 @@ def test_fetch_pulsar_preserves_relative_includes(tmp_path):
     staged_tim = manifest["tim"][0]
     included = staged_tim.parent / "tims" / "NRT.BON.1400.tim"
     assert included.exists()
+
+
+# -- .tim normalisation (tempo2 conventions PINT reads differently) ----------
+
+TOA = "c015621.align.pazr.30min 1419.557 51849.5401158655181   0.252  g   -pta EPTA -group EFF.EBPP.1410\n"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "C???? " + TOA,
+        "C" + TOA,
+        "C200404522.bb 1380.000 53202.6984954393610 1.6 wsrt -i puma1\n",
+    ],
+)
+def test_tempo2_style_commented_toa_becomes_a_pint_comment(line):
+    new, commented, dropped = normalise_tim_line(line)
+    assert new == "C " + line
+    assert commented and dropped == []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        TOA,  # lower-case c is an archive name, not a comment, to tempo2
+        "C " + TOA,
+        "CC ?c0 1419.557 51849.54 0.252 g\n",
+        "# " + TOA,
+        "FORMAT 1\n",
+        "INCLUDE tims/NRT.BON.1400.tim\n",
+        "MODE 1\n",
+        "\n",
+    ],
+)
+def test_lines_pint_already_reads_like_tempo2_are_untouched(line):
+    assert normalise_tim_line(line) == (line, False, [])
+
+
+def test_valueless_flags_are_dropped():
+    line = "m2005.rf 1403.775 53430.916 0.901 pks -f MULTI -projid -beconfig -odd -snr 70.99 -padd -0.085 -end\n"
+    new, commented, dropped = normalise_tim_line(line)
+    assert new == "m2005.rf 1403.775 53430.916 0.901 pks -f MULTI -snr 70.99 -padd -0.085\n"
+    assert not commented
+    assert dropped == ["-projid", "-beconfig", "-odd", "-end"]
+
+
+def test_normalised_lines_parse_in_pint_as_tempo2_reads_them():
+    from pint.toa import _parse_TOA_line
+
+    commented, _, _ = normalise_tim_line("C???? " + TOA)
+    assert _parse_TOA_line(commented)[1]["format"] == "Comment"
+
+    flagged, _, _ = normalise_tim_line(TOA.rstrip("\n") + " -projid -snr 70.99 -gof 1.1\n")
+    flags = _parse_TOA_line(flagged, fmt="Tempo2")[1]
+    assert flags["snr"] == "70.99" and flags["gof"] == "1.1" and "projid" not in flags
+
+
+def test_fetch_pulsar_normalises_staged_includes_not_the_release(tmp_path):
+    psr_dir = tmp_path / "release" / "J1744-1134"
+    (psr_dir / "tims").mkdir(parents=True)
+    (psr_dir / "J1744-1134.par").write_text("PSR J1744-1134\n")
+    (psr_dir / "J1744-1134.tim").write_text("FORMAT 1\nINCLUDE tims/EFF.EBPP.1410.tim\n")
+    original = "FORMAT 1\n" + TOA + "C???? " + TOA + TOA.rstrip("\n") + " -projid\n"
+    (psr_dir / "tims" / "EFF.EBPP.1410.tim").write_text(original)
+
+    manifest = fetch_pulsar("J1744-1134", tmp_path / "release", tmp_path / "staged")
+
+    summary = manifest["tim normalisation"]
+    assert summary["commented TOAs"] == 1
+    assert summary["valueless flags dropped"] == 1
+    staged = (tmp_path / "staged" / "J1744-1134" / "tims" / "EFF.EBPP.1410.tim").read_text()
+    assert "C C???? " in staged and "-projid" not in staged
+    assert summary["files changed"] == [tmp_path / "staged" / "J1744-1134" / "tims" / "EFF.EBPP.1410.tim"]
+    assert (psr_dir / "tims" / "EFF.EBPP.1410.tim").read_text() == original
+    assert len(normalisation_notes(summary)) == 2
+
+
+def test_clean_release_is_staged_byte_for_byte(release_dir, tmp_path):
+    manifest = fetch_pulsar("J1713+0747", release_dir, tmp_path / "staged")
+    assert manifest["tim normalisation"] == {"commented TOAs": 0, "valueless flags dropped": 0, "files changed": []}
+    assert normalisation_notes(manifest["tim normalisation"]) == []
