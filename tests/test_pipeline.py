@@ -126,6 +126,7 @@ class PtadataPipelineTests(unittest.TestCase):
 
         with self.assertLogs("asimov", level="WARNING") as cm:
             production.pipeline.build_dag(dryrun=False)
+            production.pipeline.submit_dag(dryrun=False)
 
         self.assertTrue(
             any("accounting information" in message for message in cm.output),
@@ -142,11 +143,33 @@ class PtadataPipelineTests(unittest.TestCase):
 
         self.assertEqual(production.job_id, 12345)
 
+    def test_build_dag_alone_does_not_submit(self):
+        production = self._make_production()
+        production.pipeline._scheduler = MagicMock()
+
+        production.pipeline.build_dag(dryrun=False)
+
+        production.pipeline._scheduler.submit.assert_not_called()
+
+    def test_build_then_submit_submits_exactly_once(self):
+        # asimov's `manage submit` calls build_dag() then submit_dag().
+        production = self._make_production()
+        production.pipeline._scheduler = MagicMock()
+        production.pipeline._scheduler.submit = MagicMock(return_value=9)
+
+        production.pipeline.build_dag(dryrun=False)
+        job_id = production.pipeline.submit_dag(dryrun=False)
+
+        production.pipeline._scheduler.submit.assert_called_once()
+        self.assertEqual(job_id, 9)
+        self.assertEqual(production.job_id, 9)
+
     def test_build_dag_passes_the_job_environment(self):
         production = self._make_production(scheduler={"environment": {"PINT_CLOCK_OVERRIDE": "/c/clock", "XDG_CACHE_HOME": "/c/astropy"}})
         production.pipeline._scheduler = MagicMock()
         production.pipeline._scheduler.submit = MagicMock(return_value=1)
         production.pipeline.build_dag(dryrun=False)
+        production.pipeline.submit_dag(dryrun=False)
         job = production.pipeline._scheduler.submit.call_args[0][0]
         self.assertEqual(job.kwargs["environment"], '"PINT_CLOCK_OVERRIDE=/c/clock XDG_CACHE_HOME=/c/astropy"')
         self.assertEqual(job.to_htcondor()["environment"], job.kwargs["environment"])
@@ -162,6 +185,7 @@ class PtadataPipelineTests(unittest.TestCase):
         try:
             with self.assertNoLogs("asimov", level="WARNING"):
                 production.pipeline.build_dag(dryrun=False)
+                production.pipeline.submit_dag(dryrun=False)
         finally:
             if had_user:
                 config.set("condor", "user", original_user)

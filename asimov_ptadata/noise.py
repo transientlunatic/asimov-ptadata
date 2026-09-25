@@ -188,20 +188,26 @@ class NoisePipeline(asimov.pipeline.Pipeline):
             )
         )
 
+        self._job = job
         if dryrun:
             self.logger.info(f"Dry run: would submit {executable} {job.kwargs['arguments']}")
-            return
-
-        cluster_id = self.scheduler.submit(job)
-        self.production.job_id = int(cluster_id)
-        self._cluster_id = cluster_id
-        self.logger.info(f"Submitted {cluster_id} to the job queue.")
 
     def submit_dag(self, dryrun=False):
-        self.build_dag(dryrun=dryrun)
-        if not dryrun:
-            self.production.status = "running"
-        return getattr(self, "_cluster_id", None)
+        # asimov's `manage submit` calls build_dag() and then submit_dag() on
+        # the same pipeline, but a restart calls submit_dag() alone: only
+        # build here if that hasn't already happened, so the job is submitted
+        # to the scheduler exactly once either way.
+        if getattr(self, "_job", None) is None:
+            self.build_dag(dryrun=dryrun)
+        if dryrun:
+            return None
+        cluster_id = self.scheduler.submit(self._job)
+        self._job = None
+        self.production.job_id = int(cluster_id)
+        self._cluster_id = cluster_id
+        self.production.status = "running"
+        self.logger.info(f"Submitted {cluster_id} to the job queue.")
+        return cluster_id
 
     def _subject_names(self):
         return [subject.name for subject in self.production.subjects]
