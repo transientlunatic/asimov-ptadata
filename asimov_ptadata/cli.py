@@ -113,11 +113,20 @@ def run(settings_file):
 @click.option("--niter", default=6000, show_default=True)
 @click.option("--burn", default=1000, show_default=True)
 @click.option("--red-noise-components", default=10, show_default=True)
-def noise_fit(par_file, tim_files, outdir, niter, burn, red_noise_components):
+@click.option("--dm-noise-components", default=10, show_default=True)
+@click.option("--ecorr/--no-ecorr", "use_ecorr", default=True, show_default=True)
+@click.option("--dm-noise/--no-dm-noise", "use_dm_noise", default=True, show_default=True)
+def noise_fit(
+    par_file, tim_files, outdir, niter, burn, red_noise_components, dm_noise_components, use_ecorr, use_dm_noise
+):
     """Run a single-pulsar Bayesian noise fit (enterprise + PINT + PTMCMCSampler)."""
     report = noise_fit_.run_noise_fit(
         par_file, list(tim_files), outdir,
-        niter=niter, burn=burn, red_noise_components=red_noise_components,
+        niter=niter, burn=burn,
+        red_noise_components=red_noise_components,
+        dm_noise_components=dm_noise_components,
+        use_ecorr=use_ecorr,
+        use_dm_noise=use_dm_noise,
     )
     click.echo(yaml.safe_dump(dataclasses.asdict(report), sort_keys=False))
     if report.status != "complete":
@@ -142,6 +151,9 @@ def noise_run(settings_file):
             niter=sampler.get("niter", 6000),
             burn=sampler.get("burn", 1000),
             red_noise_components=sampler.get("red noise components", 10),
+            dm_noise_components=sampler.get("dm noise components", 10),
+            use_ecorr=sampler.get("ecorr", True),
+            use_dm_noise=sampler.get("dm noise", True),
         )
         click.echo(f"noise-run complete for {subject['name']}: status={report.status}")
         if report.status != "complete":
@@ -156,16 +168,18 @@ def noise_run(settings_file):
     "--pulsars", "pulsars_file", required=True, type=click.Path(exists=True, dir_okay=False),
     help=(
         "YAML file listing pulsars for the joint fit: a list of mappings with "
-        "name, par, tim, and the fixed noise values (efac, log10_t2equad, "
-        "red_noise_gamma, red_noise_log10_A) - see asimov_ptadata.gwb_fit.FIXED_NOISE_PARAMS."
+        "name, par, tim, and noise_params (a dict of every fixed non-timing-model "
+        "noise parameter for that pulsar, keyed by its unprefixed name) - see "
+        "asimov_ptadata.gwb_fit._build_joint_pta."
     ),
 )
 @click.option("--outdir", required=True, type=click.Path(file_okay=False))
 @click.option("--niter", default=6000, show_default=True)
 @click.option("--burn", default=1000, show_default=True)
 @click.option("--red-noise-components", default=10, show_default=True)
+@click.option("--dm-noise-components", default=10, show_default=True)
 @click.option("--gwb-components", default=10, show_default=True)
-def gwb_fit(pulsars_file, outdir, niter, burn, red_noise_components, gwb_components):
+def gwb_fit(pulsars_file, outdir, niter, burn, red_noise_components, dm_noise_components, gwb_components):
     """Run a real, joint array-wide GWB search (fixed noise, enterprise + PINT + PTMCMCSampler)."""
     with open(pulsars_file) as f:
         pulsars = yaml.safe_load(f)
@@ -173,6 +187,7 @@ def gwb_fit(pulsars_file, outdir, niter, burn, red_noise_components, gwb_compone
         pulsars, outdir,
         niter=niter, burn=burn,
         red_noise_components=red_noise_components,
+        dm_noise_components=dm_noise_components,
         gwb_components=gwb_components,
     )
     click.echo(yaml.safe_dump(dataclasses.asdict(report), sort_keys=False))
@@ -196,6 +211,7 @@ def gwb_run(settings_file):
         niter=sampler.get("niter", 6000),
         burn=sampler.get("burn", 1000),
         red_noise_components=sampler.get("red noise components", 10),
+        dm_noise_components=sampler.get("dm noise components", 10),
         gwb_components=sampler.get("gwb components", 10),
     )
     click.echo(f"gwb-run complete: status={report.status}")

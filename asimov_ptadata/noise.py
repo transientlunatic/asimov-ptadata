@@ -147,6 +147,9 @@ class NoisePipeline(asimov.pipeline.Pipeline):
                 "niter": sampler_meta.get("niter", 6000),
                 "burn": sampler_meta.get("burn", 1000),
                 "red noise components": sampler_meta.get("red noise components", 10),
+                "dm noise components": sampler_meta.get("dm noise components", 10),
+                "ecorr": sampler_meta.get("ecorr", True),
+                "dm noise": sampler_meta.get("dm noise", True),
             },
         }
         settings_file = os.path.join(self.production.rundir, f"{name}.settings.yml")

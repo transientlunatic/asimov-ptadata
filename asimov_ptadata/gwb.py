@@ -82,8 +82,6 @@ from asimov.pipeline import PipelineException
 from asimov.review import ReviewMessage
 from asimov.scheduler import JobDescription
 
-from .gwb_fit import FIXED_NOISE_PARAMS
-
 
 class GWBPipeline(asimov.pipeline.Pipeline):
     """
@@ -125,15 +123,28 @@ class GWBPipeline(asimov.pipeline.Pipeline):
         For each subject in this project analysis, find the review-approved
         ``ptadata-noise`` production and pull out what
         ``asimov_ptadata.gwb_fit._build_joint_pta`` needs: par/tim paths and
-        the fixed noise parameter values from that pulsar's Phase-1
-        posterior means.
+        *every* fixed non-timing-model noise parameter value from that
+        pulsar's Phase-1 posterior means.
+
+        Unlike the old ``FIXED_NOISE_PARAMS``-driven extraction (kept around
+        only as a historical name in ``gwb_fit.py``, for the narrow legacy
+        compatibility path documented there), this doesn't assume a fixed
+        four-parameter shape: per-backend white noise means a different
+        *number* of parameters per pulsar (as many backends as that
+        pulsar's data actually has), and ECORR/DM noise are each
+        independently optional. So this simply strips the ``"<psr>_"``
+        prefix off every one of a completed noise report's
+        ``param_names``/``posterior_means`` pairs and hands the whole
+        resulting dict to ``gwb_fit.py`` as ``"noise_params"`` -
+        ``gwb_fit._build_joint_pta`` is what actually knows how to turn that
+        back into signals (see its module docstring).
 
         Returns
         -------
         dict
             Mapping of subject name -> the pulsar dict
             ``asimov_ptadata.gwb_fit`` expects (``"name"``, ``"par"``,
-            ``"tim"``, plus ``asimov_ptadata.gwb_fit.FIXED_NOISE_PARAMS``).
+            ``"tim"``, ``"noise_params"``).
 
         Raises
         ------
@@ -163,16 +174,16 @@ class GWBPipeline(asimov.pipeline.Pipeline):
             param_names = report.get("param_names", [])
             posterior_means = report.get("posterior_means", [])
             prefix = f"{subject.name}_"
-            fixed = {
+            noise_params = {
                 name[len(prefix):]: value
                 for name, value in zip(param_names, posterior_means)
-                if name.startswith(prefix) and name[len(prefix):] in FIXED_NOISE_PARAMS
+                if name.startswith(prefix)
             }
-            if set(FIXED_NOISE_PARAMS) - set(fixed):
+            if not noise_params:
                 missing.append(subject.name)
                 continue
 
-            resolved[subject.name] = {"name": subject.name, "par": par, "tim": tim, **fixed}
+            resolved[subject.name] = {"name": subject.name, "par": par, "tim": tim, "noise_params": noise_params}
 
         if missing:
             raise PipelineException(
@@ -203,6 +214,7 @@ class GWBPipeline(asimov.pipeline.Pipeline):
                 "niter": sampler_meta.get("niter", 6000),
                 "burn": sampler_meta.get("burn", 1000),
                 "red noise components": sampler_meta.get("red noise components", 10),
+                "dm noise components": sampler_meta.get("dm noise components", 10),
                 "gwb components": sampler_meta.get("gwb components", 10),
             },
         }

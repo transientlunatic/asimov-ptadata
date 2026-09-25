@@ -1,14 +1,16 @@
-"""Fixed-noise, array-wide gravitational-wave-background (GWB) common-process
-search: enterprise + PINT + PTMCMCSampler.
+"""Fixed-noise, array-wide gravitational-wave-background (GWB) / common
+cubic-in-time (jerk) search: enterprise + PINT + PTMCMCSampler.
 
-Phase 2 walking-skeleton scope, building directly on ``asimov_ptadata.noise_fit``
-(Phase 1): every pulsar's white-noise (EFAC + t2equad) and red-noise
-(power-law amplitude + spectral index) parameters are held **fixed** at their
-Phase-1 single-pulsar posterior means, and only the Hellings-Downs-correlated
-common red-noise process shared across the whole array is sampled. Full
-hierarchical re-fitting of per-pulsar noise jointly with the GWB is
-deliberately out of scope for this phase - see the ``asimov_ptadata.gwb``
-module docstring for the roadmap.
+Phase 2 scope, building directly on ``asimov_ptadata.noise_fit`` (Phase 1):
+every pulsar's *entire* non-timing-model noise model (per-backend EFAC +
+t2equad, optional per-backend ECORR, achromatic red noise, and optional DM
+noise - whatever ``noise_fit._build_pta`` actually sampled for that pulsar)
+is held **fixed** at its Phase-1 single-pulsar posterior means, the timing
+model is (as in Phase 1) marginalised rather than fixed or sampled, and only
+the array-wide common process shared across the whole array is sampled.
+Full hierarchical re-fitting of per-pulsar noise jointly with the common
+process is deliberately out of scope for this phase - see the
+``asimov_ptadata.gwb`` module docstring for the roadmap.
 
 This mirrors ``asimov_ptadata.noise_fit``'s split between "real science
 logic" (this module) and "Asimov plumbing" (``asimov_ptadata.gwb``): nothing
@@ -54,16 +56,59 @@ building this.
 ``enterprise.signals`` building blocks and avoid that package's
 healpy/scikit-learn dependency chain.
 
-Fixed noise parameters
-------------------------
-``enterprise.signals.parameter.Constant(value)`` (not ``Uniform``) is the
-correct ``enterprise`` API for a non-sampled fixed parameter - it's a class
-factory exactly like ``Uniform``/``Normal``, just with a fixed ``.value``
-instead of a prior, so it plugs directly into
+Fixed noise parameters, and why they're set via ``PTA.set_default_params``
+-----------------------------------------------------------------------------
+``enterprise.signals.parameter.Constant()`` (not ``Uniform``) is the correct
+``enterprise`` API for a non-sampled fixed parameter - it's a class factory
+exactly like ``Uniform``/``Normal``, so it plugs directly into
 ``white_signals.MeasurementNoise``/``gp_priors.powerlaw`` the same way
 ``Uniform(...)`` does in ``noise_fit.py``. Confirmed directly (a
 ``parameter.Constant``-only PTA builds and evaluates its likelihood/prior
 with zero free per-pulsar-noise parameters) while building this.
+
+The per-pulsar signal model itself - ``noise_fit._build_noise_model(...,
+fixed=True)`` - is built with ``fixed=True`` but is otherwise *structurally
+identical* to Phase 1's free/sampled model: the same single
+``selections.Selection(selections.by_backend)``-selected
+``MeasurementNoise``/``EcorrKernelNoise`` signals covering every backend at
+once, just built from unset ``parameter.Constant()`` instead of
+``parameter.Uniform(...)``. The actual fixed values are then filled in
+*after* the ``PTA`` is built, via ``signal_base.PTA.set_default_params()``
+(keyed by each parameter's real full name, e.g.
+``"<psr>_<backend>_efac"``) - not by constructing a separate
+``parameter.Constant(value)`` per backend and combining several
+single-backend-selection signals together, which was tried first: with more
+than one backend's ECORR present, that raises ``TypeError: unsupported
+operand type(s) for /: 'float' and 'ShermanMorrison'`` deep inside
+``enterprise.signals.signal_base.ConstantParameter._solve_D1`` - confirmed
+directly while building this (see ``noise_fit._build_noise_model``'s own
+docstring for the same note, since that's where the shared model-building
+code actually lives). ``set_default_params`` sidesteps the problem
+entirely, and is in any case the API ``enterprise`` itself documents for
+this (its own ``parameter.Constant`` docstring: "Leave ``val=None`` to set
+value later, ... with ``signal_base.PTA.set_default_params()``").
+
+Carrying *all* of a pulsar's fixed noise values, not a hard-coded four
+------------------------------------------------------------------------
+Earlier versions of this module accepted exactly four fixed values per
+pulsar (``FIXED_NOISE_PARAMS`` below, kept only for backwards
+compatibility - see its own docstring). Now that Phase 1 fits a
+pulsar-dependent *set* of noise parameters (a different number of backends
+per pulsar, ECORR/DM noise each independently optional), that fixed shape
+no longer fits: each ``pulsars`` entry instead carries a
+``"noise_params"`` dict of *every* non-timing-model parameter name (with
+the ``"<psr>_"`` prefix already stripped, exactly as ``asimov_ptadata.gwb.
+_resolve_subject_data`` produces it from a Phase-1 ``noise_report.yml``'s
+``param_names``/``posterior_means``) mapped to its Phase-1 posterior mean.
+This module doesn't need to know in advance which backends or optional
+signals a given pulsar has - it builds the same model structure Phase 1
+would have (deriving backend keys from the pulsar's own ``.tim`` data, via
+the same ``selections.by_backend`` used in Phase 1) and lets
+``set_default_params`` fail loudly (an ``enterprise``-logged "not set!"
+warning, then a ``TypeError``/``AttributeError`` from the likelihood trying
+to use a ``None`` value) if ``noise_params`` doesn't actually cover
+everything that model needs - rather than silently accepting a
+partially-specified fixed-noise dict.
 
 Sampler choice and the ``covUpdate``/``burn`` requirement
 -----------------------------------------------------------
@@ -86,16 +131,31 @@ import yaml
 
 from .noise_fit import _sample_with_rng
 
-# The fixed per-pulsar noise parameter keys every entry in the ``pulsars``
-# list passed to ``run_gwb_fit``/``_build_joint_pta`` must carry, alongside
-# "name"/"par"/"tim". These match the *unprefixed* tail of the parameter
-# names ``noise_fit.py``'s ``_build_pta`` produces (e.g. a PTA parameter
-# named "1748-2021E_red_noise_log10_A" contributes the value keyed here as
-# "red_noise_log10_A") - confirmed directly against a real single-pulsar PTA
-# while building this. ``asimov_ptadata.gwb._resolve_subject_data`` is what
-# actually performs that name-stripping, reading a Phase-1
-# ``noise_report.yml``'s ``param_names``/``posterior_means``.
+# The exact four fixed-noise parameter names this module used to require -
+# from before per-backend white noise, ECORR and DM noise existed, when
+# every pulsar's noise model was a single global EFAC + t2equad (no backend
+# selection) plus achromatic red noise. Kept only so a pre-existing
+# ``noise_report.yml`` written by that older ``noise_fit.py`` (whose
+# ``param_names`` are of the form "<psr>_efac", not "<psr>_<backend>_efac")
+# still resolves into a fixed noise model here rather than erroring - see
+# ``_is_legacy_noise_params``/``_build_joint_pta``. Any *new* Phase-1 run
+# produces per-backend-suffixed names instead, so this legacy path is a
+# deliberately narrow one-way compatibility shim, not the general case.
 FIXED_NOISE_PARAMS = ("efac", "log10_t2equad", "red_noise_gamma", "red_noise_log10_A")
+
+
+def _is_legacy_noise_params(noise_params):
+    """
+    True if ``noise_params`` (a pulsar's fixed-noise dict, keyed by
+    unprefixed parameter name) matches exactly the old pre-per-backend
+    ``FIXED_NOISE_PARAMS`` shape: a single global EFAC/t2equad pair and a
+    single achromatic red-noise pair, nothing else. Used by
+    ``_build_joint_pta`` to fall back to the old ``selections.no_selection``,
+    no-ECORR, no-DM-noise model structure for a noise report generated
+    before this module supported per-backend noise, rather than building a
+    per-backend model that a legacy dict could never fully populate.
+    """
+    return set(noise_params) == set(FIXED_NOISE_PARAMS)
 
 
 @dataclasses.dataclass
@@ -119,34 +179,42 @@ def _as_tim_list(tim_files):
     return [tim_files] if isinstance(tim_files, (str, Path)) else list(tim_files)
 
 
-def _build_joint_pta(pulsars, red_noise_components=10, gwb_components=10):
+def _build_joint_pta(pulsars, red_noise_components=10, dm_noise_components=10, gwb_components=10):
     """
     Build a real, joint ``enterprise`` PTA likelihood across every pulsar in
-    ``pulsars``: per-pulsar EFAC + t2equad white noise and power-law
-    red-noise, all held **fixed** at Phase-1's posterior means, plus one
-    Hellings-Downs-correlated common red-noise process shared across the
-    whole array.
+    ``pulsars``: each pulsar's full non-timing-model noise model (per-backend
+    white noise, optional ECORR, red noise, optional DM noise), all held
+    **fixed** at Phase-1's posterior means, plus one common process (the
+    Hellings-Downs-correlated GWB / shared cubic-in-time jerk term) sampled
+    jointly across the whole array. Each pulsar's timing model is
+    marginalised (``gp_signals.TimingModel``), exactly as in Phase 1 - not
+    fixed, since a marginalised timing model has no posterior mean to fix at
+    in the first place (it's projected out analytically, not sampled).
 
     Parameters
     ----------
     pulsars : list of dict
-        One entry per pulsar, each with keys ``"name"``, ``"par"``,
-        ``"tim"`` (a path or list of paths), and the fixed noise values
-        ``"efac"``, ``"log10_t2equad"``, ``"red_noise_gamma"``,
-        ``"red_noise_log10_A"`` (see ``FIXED_NOISE_PARAMS``).
-    red_noise_components : int
-        Number of Fourier components for each pulsar's (fixed) red-noise GP.
+        One entry per pulsar, each with keys ``"name"``, ``"par"``, ``"tim"``
+        (a path or list of paths), and ``"noise_params"``: a dict of every
+        fixed non-timing-model noise parameter for that pulsar, keyed by its
+        unprefixed name (e.g. ``"430_ASP_efac"``, ``"red_noise_log10_A"``,
+        ``"dm_gp_log10_A"``) - see the module docstring, and
+        ``asimov_ptadata.gwb._resolve_subject_data`` for how this is built
+        from a Phase-1 ``noise_report.yml``.
+    red_noise_components, dm_noise_components : int
+        Number of Fourier components for each pulsar's (fixed) red-noise and
+        (if present) DM-noise GPs.
     gwb_components : int
-        Number of Fourier components for the shared GWB common process.
+        Number of Fourier components for the shared common process.
 
     Returns
     -------
     (list of enterprise.pulsar.Pulsar, enterprise.signals.signal_base.PTA)
     """
     from enterprise.pulsar import Pulsar
-    from enterprise.signals import gp_priors, gp_signals, parameter, selections, signal_base, utils, white_signals
+    from enterprise.signals import gp_priors, gp_signals, parameter, selections, signal_base, utils
 
-    selection = selections.Selection(selections.no_selection)
+    from .noise_fit import _build_noise_model
 
     # Instantiated exactly once, with an explicit shared name - see the
     # module docstring for why this (rather than calling parameter.Uniform()
@@ -163,25 +231,44 @@ def _build_joint_pta(pulsars, red_noise_components=10, gwb_components=10):
 
     psrs = []
     signalcollections = []
+    fixed_values = {}
     for entry in pulsars:
         tim_files = _as_tim_list(entry["tim"])
         tim_arg = [str(t) for t in tim_files] if len(tim_files) > 1 else str(tim_files[0])
         psr = Pulsar(str(entry["par"]), tim_arg, timing_package="pint")
         psrs.append(psr)
 
-        efac = parameter.Constant(entry["efac"])
-        log10_t2equad = parameter.Constant(entry["log10_t2equad"])
-        white = white_signals.MeasurementNoise(efac=efac, log10_t2equad=log10_t2equad, selection=selection)
+        noise_params = entry["noise_params"]
+        legacy = _is_legacy_noise_params(noise_params)
+        # "log10_ecorr" (bare, no leading underscore) matches a pulsar whose
+        # data carries no backend-identifying tim-file flags at all: per
+        # noise_fit.py's docstring, enterprise.pulsar.BasePulsar.backend_flags
+        # then falls back to a single "" (empty-string) backend for every
+        # TOA, and selections.by_backend's own naming
+        # (enterprise/signals/selections.py's Selection.__call__) omits an
+        # empty selection key from the parameter name rather than using it
+        # as a literal "" prefix - confirmed directly against a real
+        # flag-free .tim file while building this.
+        use_ecorr = (not legacy) and any(
+            name == "log10_ecorr" or name.endswith("_log10_ecorr") for name in noise_params
+        )
+        use_dm_noise = (not legacy) and ("dm_gp_log10_A" in noise_params)
 
-        gamma = parameter.Constant(entry["red_noise_gamma"])
-        log10_A = parameter.Constant(entry["red_noise_log10_A"])
-        red_prior = gp_priors.powerlaw(log10_A=log10_A, gamma=gamma)
-        red_noise = gp_signals.FourierBasisGP(red_prior, components=red_noise_components)
-
-        model = white + red_noise + gwb
+        noise_model = _build_noise_model(
+            red_noise_components=red_noise_components,
+            dm_noise_components=dm_noise_components,
+            use_ecorr=use_ecorr,
+            use_dm_noise=use_dm_noise,
+            fixed=True,
+            selection_fn=selections.no_selection if legacy else None,
+        )
+        model = noise_model + gwb
         signalcollections.append(model(psr))
 
+        fixed_values.update({f"{psr.name}_{name}": value for name, value in noise_params.items()})
+
     pta = signal_base.PTA(signalcollections)
+    pta.set_default_params(fixed_values)
     return psrs, pta
 
 
@@ -192,6 +279,7 @@ def run_gwb_fit(
     burn=1000,
     cov_update=None,
     red_noise_components=10,
+    dm_noise_components=10,
     gwb_components=10,
     seed=None,
 ):
@@ -209,10 +297,11 @@ def run_gwb_fit(
     niter, burn, cov_update, seed :
         See ``noise_fit.run_noise_fit`` - identical semantics and the same
         ``cov_update``-must-match-``burn`` requirement.
-    red_noise_components : int
-        Number of red-noise Fourier components per pulsar (fixed process).
+    red_noise_components, dm_noise_components : int
+        Number of red-noise / (if present) DM-noise Fourier components per
+        pulsar (both fixed processes).
     gwb_components : int
-        Number of Fourier components for the shared GWB process (the only
+        Number of Fourier components for the shared common process (the only
         sampled signal in this fixed-noise phase).
 
     Returns
@@ -250,7 +339,10 @@ def run_gwb_fit(
 
     try:
         psrs, pta = _build_joint_pta(
-            pulsars, red_noise_components=red_noise_components, gwb_components=gwb_components
+            pulsars,
+            red_noise_components=red_noise_components,
+            dm_noise_components=dm_noise_components,
+            gwb_components=gwb_components,
         )
     except Exception as exc:
         report = GWBFitReport(
