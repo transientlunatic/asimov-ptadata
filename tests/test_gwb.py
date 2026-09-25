@@ -341,6 +341,18 @@ class GWBPipelineTests(unittest.TestCase):
         self.assertEqual(job_id, 321)
         self.assertEqual(analysis.status, "running")
 
+    def test_build_dag_passes_the_job_environment(self):
+        for name in self.pulsar_names:
+            self._make_reduce_production(name)
+            self._make_noise_analysis(name)
+        analysis = self._make_gwb_analysis(scheduler={"environment": {"PINT_CLOCK_OVERRIDE": "/c/clock", "XDG_CACHE_HOME": "/c/astropy"}})
+        analysis.pipeline._scheduler = MagicMock()
+        analysis.pipeline._scheduler.submit = MagicMock(return_value=1)
+        analysis.pipeline.build_dag(dryrun=False)
+        job = analysis.pipeline._scheduler.submit.call_args[0][0]
+        self.assertEqual(job.kwargs["environment"], '"PINT_CLOCK_OVERRIDE=/c/clock XDG_CACHE_HOME=/c/astropy"')
+        self.assertEqual(job.to_htcondor()["environment"], job.kwargs["environment"])
+
     def test_build_dag_supplies_accounting_group_when_configured(self):
         from asimov import config
 

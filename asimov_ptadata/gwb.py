@@ -82,6 +82,8 @@ from asimov.pipeline import PipelineException
 from asimov.review import ReviewMessage
 from asimov.scheduler import JobDescription
 
+from .scheduling import configured_scheduler_type, job_environment_kwargs
+
 
 class GWBPipeline(asimov.pipeline.Pipeline):
     """
@@ -245,6 +247,12 @@ class GWBPipeline(asimov.pipeline.Pipeline):
             self.logger.warning(
                 "This job does not supply any accounting information, which may prevent it running on some clusters."
             )
+
+        job.kwargs.update(
+            job_environment_kwargs(
+                self.production.meta.get("scheduler", {}).get("environment"), configured_scheduler_type()
+            )
+        )
 
         if dryrun:
             self.logger.info(f"Dry run: would submit {executable} {job.kwargs['arguments']}")
