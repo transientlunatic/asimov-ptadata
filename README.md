@@ -145,7 +145,17 @@ and DM noise (a 121-parameter joint fit) stayed about 4 dex below their DR2
 then leaked into the downstream fixed-noise jerk search as an 11 sigma
 line-of-sight artefact.
 
-The fit is now two-stage by default. Stage 1 samples every parameter,
+**By default the white noise is fixed at its MAP** (`white noise: map`).
+Each backend's EFAC/EQUAD/ECORR and the red/DM hyperparameters are
+maximised in turn (bounded Powell) until a round improves the log
+posterior by less than 0.1, and then only the red/DM noise is sampled
+(stage 2 below). Sampling the white noise as well did not mix for large
+models: J1713+0747's ~117 white-noise parameters had an ESS of ~10 after
+20000 iterations, while the red/DM noise came out the same either way
+(log10 A within ~0.05). The MAP ignores white-noise uncertainty, as PTA
+noise analyses commonly do; `white noise: sample` samples it instead:
+
+With `white noise: sample` the fit is two-stage. Stage 1 samples every parameter,
 started from an **optimised** point rather than a prior draw (white noise
 at nominal values; red/DM hyperparameters at a bounded-Powell likelihood
 maximum), and proposes in **parameter groups** (every parameter; each
@@ -169,6 +179,7 @@ silently carrying bad noise values downstream.
 sampler:
   niter: 20000              # stage 1
   burn: 5000                # 2000 was too short: stage 1 was still climbing
+  white noise: map          # or sample (stage 1 below)
   two stage: true
   stage 2 niter: 20000      # defaults to niter
   optimise start: true

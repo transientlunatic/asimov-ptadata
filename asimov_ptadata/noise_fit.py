@@ -382,8 +382,10 @@ def _bounds(param):
     return float(draws.min()), float(draws.max())
 
 
-def _initial_point(pta, x_prior, rounds=2, maxfev=400, maxfev_backend=60):
-    """A starting point near the likelihood peak.
+def _initial_point(pta, x_prior, rounds=2, maxfev=400, maxfev_backend=60, tol=None):
+    """A starting point near the likelihood peak - or, run to a tolerance
+    (``tol``: stop once a round improves the log posterior by less), the
+    MAP white noise used when ``white_noise="map"``.
 
     White noise starts at nominal values (EFAC 1, EQUAD/ECORR near the
     bottom of their priors), then ``rounds`` of coordinate ascent alternate
@@ -422,13 +424,22 @@ def _initial_point(pta, x_prior, rounds=2, maxfev=400, maxfev_backend=60):
         if np.isfinite(result.fun):
             x[idx] = result.x
 
+    def lnpost():
+        lp = pta.get_lnprior(x)
+        return -np.inf if not np.isfinite(lp) else pta.get_lnlikelihood(x) + lp
+
     red_dm = [i for i, n in enumerate(names) if not _is_white(n)]
     backends = _backend_groups(names)
+    previous = lnpost()
     for _ in range(rounds):
         if red_dm:
             maximise(red_dm, maxfev)
         for group in backends:
             maximise(group, maxfev_backend)
+        current = lnpost()
+        if tol is not None and current - previous < tol:
+            break
+        previous = current
     if red_dm:
         maximise(red_dm, maxfev)
     return x
@@ -492,6 +503,12 @@ def _proposal_scales(names):
     return np.array([next((w for suffix, w in _PROPOSAL_SCALES if n.endswith(suffix)), 0.1) for n in names])
 
 
+# MAP white noise: coordinate-ascent rounds, stopping once a round improves
+# the log posterior by less than MAP_TOL.
+MAP_MAX_ROUNDS = 8
+MAP_TOL = 0.1
+
+
 def _run_ptmcmc(logl, logp, x0, groups, outdir, niter, adapt, names=None):
     """Run PTMCMCSampler, re-estimating its proposal covariance every
     ``adapt`` iterations.
@@ -534,6 +551,7 @@ def run_noise_fit(
     optimise_start=True,
     min_ess=200.0,
     max_split_shift=0.3,
+    white_noise="map",
 ):
     """
     Run a real single-pulsar noise fit and write the chain plus a summary
@@ -587,6 +605,16 @@ def run_noise_fit(
         Seed for the initial-sample RNG, for reproducibility.
     two_stage, stage2_niter, optimise_start, min_ess, max_split_shift
         See above.
+    white_noise : {"map", "sample"}
+        ``"map"`` (the default): skip stage 1 and fix the white noise at its
+        MAP, found by running :func:`_initial_point`'s coordinate ascent to a
+        tolerance; stage 2 samples the red/DM noise. ``"sample"``: stage 1
+        samples everything as described above. For large white-noise models
+        stage 1 mixes badly - J1713+0747's ~117 white-noise parameters had
+        ESS ~10 after 20000 iterations - while the red/DM noise the
+        downstream searches depend on came out the same either way (log10 A
+        within ~0.05); the MAP ignores white-noise uncertainty, as PTA noise
+        analyses commonly do.
 
     Returns
     -------
@@ -633,26 +661,43 @@ def run_noise_fit(
     ndim = len(x0)
     red_dm = [i for i, n in enumerate(names) if not _is_white(n)]
 
-    try:
-        if optimise_start:
-            x0 = _initial_point(pta, x0)
-            notes.append(
-                "stage 1 started from optimised red/DM noise: "
-                + ", ".join(f"{names[i].split('_', 1)[1]}={x0[i]:.2f}" for i in red_dm)
-            )
-        chain1 = _run_ptmcmc(
-            pta.get_lnlikelihood, pta.get_lnprior, x0, _param_groups(names), outdir / "chain", niter,
-            cov_update, names=names,
-        )
-        post1 = chain1[burn:, :ndim] if chain1.shape[0] > burn else chain1[:, :ndim]
-        means = post1.mean(axis=0)
-        # Stage 1 must have stopped climbing: a chain still heading for the
-        # peak gives white-noise means stage 2 would then converge around.
-        lnl1 = chain1[burn:, ndim + 1] if chain1.shape[0] > burn else chain1[:, ndim + 1]
-        stage1_lnl_shift = split_shift(lnl1)
-        decisive, decisive_names, decisive_chain = post1[:, red_dm], [names[i] for i in red_dm], chain1
+    # Nothing to fix (or nothing but white noise): sample everything.
+    if white_noise == "map" and not (red_dm and len(red_dm) < ndim):
+        white_noise = "sample"
 
-        if two_stage and red_dm and len(red_dm) < ndim:
+    try:
+        stage1_lnl_shift = None
+        if white_noise == "map":
+            x0 = _initial_point(pta, x0, rounds=MAP_MAX_ROUNDS, tol=MAP_TOL)
+            means = x0.copy()
+            notes.append(
+                "white noise fixed at its MAP (coordinate ascent, "
+                f"to dlnpost < {MAP_TOL}); stage 1 not run"
+            )
+            run_stage2 = True
+        else:
+            if optimise_start:
+                x0 = _initial_point(pta, x0)
+                notes.append(
+                    "stage 1 started from optimised red/DM noise: "
+                    + ", ".join(f"{names[i].split('_', 1)[1]}={x0[i]:.2f}" for i in red_dm)
+                )
+            chain1 = _run_ptmcmc(
+                pta.get_lnlikelihood, pta.get_lnprior, x0, _param_groups(names), outdir / "chain", niter,
+                cov_update, names=names,
+            )
+            post1 = chain1[burn:, :ndim] if chain1.shape[0] > burn else chain1[:, :ndim]
+            means = post1.mean(axis=0)
+            # Stage 1 must have stopped climbing: a chain still heading for
+            # the peak gives white-noise means stage 2 would then converge
+            # around.
+            lnl1 = chain1[burn:, ndim + 1] if chain1.shape[0] > burn else chain1[:, ndim + 1]
+            stage1_lnl_shift = split_shift(lnl1)
+            decisive, decisive_chain = post1[:, red_dm], chain1[:, :ndim]
+            run_stage2 = bool(two_stage and red_dm and len(red_dm) < ndim)
+        decisive_names = [names[i] for i in red_dm]
+
+        if run_stage2:
             n2 = int(stage2_niter or niter)
             burn2 = min(burn, max(n2 // 10, 1))
             fixed = means.copy()
@@ -678,8 +723,6 @@ def run_noise_fit(
             means[red_dm] = post2.mean(axis=0)
             decisive, decisive_chain = post2, chain2[:, :k]
             notes.append(f"stage 2: red/DM noise re-sampled for {n2} iterations with white noise fixed")
-        else:
-            decisive_chain = chain1[:, :ndim]
     except Exception as exc:
         # A report has to land here regardless of outcome: the Asimov
         # pipeline's detect_completion() just checks for this file's
@@ -713,8 +756,10 @@ def run_noise_fit(
             f"not converged: some red/DM noise parameter has ESS < {min_ess} or a split-half shift "
             f"> {max_split_shift} SD"
         )
-    convergence["stage 1 lnlikelihood split_shift"] = round(stage1_lnl_shift, 3)
-    if stage1_lnl_shift > max_split_shift:
+    convergence["white noise"] = white_noise
+    if stage1_lnl_shift is not None:
+        convergence["stage 1 lnlikelihood split_shift"] = round(stage1_lnl_shift, 3)
+    if stage1_lnl_shift is not None and stage1_lnl_shift > max_split_shift:
         converged = False
         notes.append(
             f"stage 1 not stationary: its log-likelihood shifted by {stage1_lnl_shift:.2f} SD between halves "

@@ -148,5 +148,50 @@ class BuildPTATests(unittest.TestCase):
         self._assert_finite_likelihood(pta)
 
 
+class RunNoiseFitTests(unittest.TestCase):
+    """Short real end-to-end runs of ``run_noise_fit`` in both white-noise
+    modes (too short to converge - this checks the plumbing, not the
+    statistics)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.workdir = Path(tempfile.mkdtemp(prefix="ptadata-run-noise-fit-test-"))
+        cls.par_path, cls.tim_path = _make_two_backend_fixture(cls.workdir)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.workdir, ignore_errors=True)
+
+    def _run(self, white_noise):
+        from asimov_ptadata.noise_fit import run_noise_fit
+
+        outdir = self.workdir / white_noise
+        report = run_noise_fit(
+            self.par_path, [self.tim_path], outdir, niter=300, burn=100, stage2_niter=300,
+            red_noise_components=5, dm_noise_components=5, seed=1, white_noise=white_noise,
+        )
+        self.assertEqual(report.status, "complete", report.notes)
+        return report, outdir
+
+    def test_map_mode_fixes_white_noise_and_samples_red_dm_only(self):
+        report, outdir = self._run("map")
+        self.assertEqual(report.convergence["white noise"], "map")
+        self.assertNotIn("stage 1 lnlikelihood split_shift", report.convergence)
+        self.assertFalse((outdir / "chain").exists())
+        self.assertTrue((outdir / "chain_stage2" / "chain_1.txt").exists())
+        self.assertEqual(
+            set(report.convergence["parameters"]),
+            {n for n in report.param_names if not n.endswith(("_efac", "_log10_t2equad", "_log10_ecorr"))},
+        )
+        self.assertTrue(any("MAP" in n for n in report.notes))
+
+    def test_sample_mode_runs_both_stages(self):
+        report, outdir = self._run("sample")
+        self.assertEqual(report.convergence["white noise"], "sample")
+        self.assertIn("stage 1 lnlikelihood split_shift", report.convergence)
+        self.assertTrue((outdir / "chain" / "chain_1.txt").exists())
+        self.assertTrue((outdir / "chain_stage2" / "chain_1.txt").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
