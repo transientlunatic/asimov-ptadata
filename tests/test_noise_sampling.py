@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from asimov_ptadata.noise_fit import (
+    ecorr_method_for,
     _initial_point,
     _param_groups,
     convergence_summary,
@@ -229,6 +230,24 @@ class InitialPointTests(unittest.TestCase):
         for name, target_value in self.target.items():
             idx = self.names.index(name)
             self.assertAlmostEqual(x0[idx], target_value, delta=0.1)
+
+
+class EcorrMethodTests(unittest.TestCase):
+    """``ecorr_method_for``: fastshermanmorrison fails on a pulsar with no
+    multi-TOA epoch at all, so those get enterprise's plain method."""
+
+    @staticmethod
+    def _psr(toas_s, flags):
+        return SimpleNamespace(toas=np.asarray(toas_s, dtype=float), backend_flags=np.asarray(flags))
+
+    def test_fast_method_when_some_backend_has_an_epoch(self):
+        # Two TOAs 0.5 s apart on backend A form an epoch; B has only singles.
+        psr = self._psr([0.0, 0.5, 1e5, 2e5], ["A", "A", "B", "B"])
+        self.assertEqual(ecorr_method_for(psr), "fast-sherman-morrison")
+
+    def test_plain_method_when_no_backend_has_an_epoch(self):
+        psr = self._psr([0.0, 1e5, 2e5, 3e5], ["A", "A", "B", "B"])
+        self.assertEqual(ecorr_method_for(psr), "sherman-morrison")
 
 
 if __name__ == "__main__":

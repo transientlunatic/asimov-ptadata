@@ -214,7 +214,7 @@ def _build_joint_pta(pulsars, red_noise_components=10, dm_noise_components=10, g
     from enterprise.pulsar import Pulsar
     from enterprise.signals import gp_priors, gp_signals, parameter, selections, signal_base, utils
 
-    from .noise_fit import _build_noise_model
+    from .noise_fit import _build_noise_model, ecorr_method_for
 
     # Instantiated exactly once, with an explicit shared name - see the
     # module docstring for why this (rather than calling parameter.Uniform()
@@ -261,6 +261,7 @@ def _build_joint_pta(pulsars, red_noise_components=10, dm_noise_components=10, g
             use_dm_noise=use_dm_noise,
             fixed=True,
             selection_fn=selections.no_selection if legacy else None,
+            ecorr_method=ecorr_method_for(psr),
         )
         model = noise_model + gwb
         signalcollections.append(model(psr))

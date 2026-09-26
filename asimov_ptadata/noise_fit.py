@@ -150,6 +150,24 @@ class NoiseFitReport:
             yaml.safe_dump(dataclasses.asdict(self), f, sort_keys=False)
 
 
+def ecorr_method_for(psr):
+    """enterprise's ECORR method for this pulsar: ``fast-sherman-morrison``
+    (fastshermanmorrison, ~1.6x faster), unless no backend has an epoch with
+    at least two TOAs - then fastshermanmorrison's constructor fails on the
+    empty epoch list (``np.vstack`` of nothing: "need at least one array to
+    concatenate") and the plain ``sherman-morrison`` method is used instead.
+    Epochs are found exactly as ``EcorrKernelNoise`` finds them (1 s
+    quantisation, at least two TOAs, per backend)."""
+    from enterprise.signals import utils
+
+    flags = np.asarray(psr.backend_flags)
+    for backend in np.unique(flags):
+        umat = utils.create_quantization_matrix(psr.toas[flags == backend], nmin=2)[0]
+        if umat.shape[1] > 0:
+            return "fast-sherman-morrison"
+    return "sherman-morrison"
+
+
 def _build_noise_model(
     red_noise_components=10,
     dm_noise_components=10,
@@ -157,6 +175,7 @@ def _build_noise_model(
     use_dm_noise=True,
     fixed=False,
     selection_fn=None,
+    ecorr_method="fast-sherman-morrison",
 ):
     """
     Build the per-pulsar signal model shared by every pulsar in both the
@@ -212,6 +231,8 @@ def _build_noise_model(
         flags). Overridable so ``gwb_fit._build_joint_pta`` can fall back to
         ``selections.no_selection`` for a *legacy* fixed-noise dict that
         predates per-backend noise support (see that module's docstring).
+    ecorr_method : str
+        enterprise's ``EcorrKernelNoise`` method; see :func:`ecorr_method_for`.
 
     Returns
     -------
@@ -235,7 +256,7 @@ def _build_noise_model(
 
     if use_ecorr:
         log10_ecorr = _param(-10, -5)
-        model += white_signals.EcorrKernelNoise(log10_ecorr=log10_ecorr, selection=selection)
+        model += white_signals.EcorrKernelNoise(log10_ecorr=log10_ecorr, selection=selection, method=ecorr_method)
 
     log10_A = _param(-20, -11)
     gamma = _param(0, 7)
@@ -302,6 +323,7 @@ def _build_pta(
         use_ecorr=use_ecorr,
         use_dm_noise=use_dm_noise,
         fixed=False,
+        ecorr_method=ecorr_method_for(psr),
     )
     pta = signal_base.PTA([model(psr)])
     return psr, pta

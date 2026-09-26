@@ -38,11 +38,13 @@ from asimov_ptadata.noise_fit import _build_pta
 
 
 def setUpModule():
-    import astropy.coordinates as coord
+    # Through PINT's own loader, which is what the PTA uses: it falls back to
+    # JPL's a_old_versions/ mirror. astropy's solar_system_ephemeris URL for
+    # DE421 now returns 404, which silently skipped this whole module.
+    import pint.solar_system_ephemerides as sse
 
     try:
-        with coord.solar_system_ephemeris.set("de421"):
-            pass
+        sse.load_kernel("de421")
     except Exception as exc:  # pragma: no cover - depends on network access
         raise unittest.SkipTest(f"de421 solar-system ephemeris not resolvable: {exc!r}")
 
