@@ -370,6 +370,7 @@ class NoisePipelineTests(unittest.TestCase):
             "pulsar": subject_name, "ntoas": 62,
             "param_names": [], "posterior_means": [],
             "status": status,
+            "converged": status == "complete",
         }
         report.update(extra)
         (report_dir / "noise_report.yml").write_text(yaml.safe_dump(report))
@@ -384,6 +385,25 @@ class NoisePipelineTests(unittest.TestCase):
         self.assertEqual(analysis.review.status, "APPROVED")
         self.assertEqual(len(analysis.review), 1)
         self.assertEqual(analysis.status, "uploaded")
+
+    def test_after_completion_leaves_unconverged_fit_for_a_human(self):
+        analysis = self._make_project_analysis()
+        self._write_noise_report(analysis, self.pulsar_name, "complete", converged=False)
+
+        analysis.pipeline.after_completion()
+
+        self.assertEqual(len(analysis.review), 0)
+        self.assertEqual(analysis.status, "uploaded")
+
+    def test_after_completion_treats_a_report_without_a_verdict_as_unconverged(self):
+        analysis = self._make_project_analysis()
+        report = self._write_noise_report(analysis, self.pulsar_name, "complete")
+        report.pop("converged")
+        (Path(analysis.rundir) / "noise" / self.pulsar_name / "noise_report.yml").write_text(yaml.safe_dump(report))
+
+        analysis.pipeline.after_completion()
+
+        self.assertEqual(len(analysis.review), 0)
 
     def test_after_completion_rejects_review_on_failed(self):
         analysis = self._make_project_analysis()
