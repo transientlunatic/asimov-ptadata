@@ -77,6 +77,31 @@ class BuildJointPTATests(unittest.TestCase):
         self.assertEqual(sorted(pta.param_names), ["gwb_gamma", "gwb_log10_A"])
         self._assert_finite_likelihood(pta)
 
+    def test_fixed_gamma_leaves_only_the_amplitude_free(self):
+        pulsars = [{
+            "name": "1748-2021E",
+            "par": self.par_path,
+            "tim": [self.tim_path],
+            "noise_params": {
+                "430_ASP_efac": 1.1,
+                "430_ASP_log10_t2equad": -7.0,
+                "430_ASP_log10_ecorr": -7.2,
+                "Lwide_PUPPI_efac": 0.95,
+                "Lwide_PUPPI_log10_t2equad": -7.3,
+                "Lwide_PUPPI_log10_ecorr": -7.6,
+                "red_noise_gamma": 3.5,
+                "red_noise_log10_A": -14.0,
+                "dm_gp_gamma": 2.1,
+                "dm_gp_log10_A": -13.5,
+            },
+        }]
+
+        _, pta = _build_joint_pta(pulsars, red_noise_components=5, dm_noise_components=5, gwb_components=5,
+                                  gwb_gamma=13 / 3)
+
+        self.assertEqual(pta.param_names, ["gwb_log10_A"])
+        self._assert_finite_likelihood(pta)
+
     def test_legacy_fixed_noise_dict_still_builds_a_working_pta(self):
         # The old, pre-per-backend FIXED_NOISE_PARAMS shape (no backend
         # suffix, no ECORR, no DM noise) - confirms the backwards

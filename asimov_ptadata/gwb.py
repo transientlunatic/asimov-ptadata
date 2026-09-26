@@ -218,6 +218,8 @@ class GWBPipeline(asimov.pipeline.Pipeline):
                 "red noise components": sampler_meta.get("red noise components", 10),
                 "dm noise components": sampler_meta.get("dm noise components", 10),
                 "gwb components": sampler_meta.get("gwb components", 10),
+                # 13/3 (a GW-driven SMBHB background) unless set; null samples it.
+                "gwb gamma": sampler_meta.get("gwb gamma", 13 / 3),
             },
         }
         settings_file = os.path.join(self.production.rundir, f"{name}.settings.yml")

@@ -169,6 +169,12 @@ class GWBFitReport:
     sampler: str
     status: str
     notes: list
+    # Parameters held fixed (e.g. gwb_gamma at 13/3), 5/50/95% summaries of
+    # the sampled ones, and whether the data constrain the amplitude well
+    # enough for a downstream search to fix it at the posterior mean.
+    fixed: dict | None = None
+    summary: dict | None = None
+    amplitude_constrained: bool | None = None
 
     def save(self, path):
         with open(path, "w") as f:
@@ -179,7 +185,31 @@ def _as_tim_list(tim_files):
     return [tim_files] if isinstance(tim_files, (str, Path)) else list(tim_files)
 
 
-def _build_joint_pta(pulsars, red_noise_components=10, dm_noise_components=10, gwb_components=10):
+# Prior on the common process's log10 amplitude, and the fraction of its SD
+# the posterior SD must be below for the amplitude to count as constrained.
+GWB_LOG10_A_PRIOR = (-20.0, -11.0)
+CONSTRAINED_SD_FRACTION = 0.5
+
+
+def _summaries(post_burn, names):
+    return {
+        name: {k: round(float(v), 4) for k, v in zip(("p05", "p50", "p95"), np.percentile(post_burn[:, i], [5, 50, 95]))}
+        | {"sd": round(float(np.std(post_burn[:, i])), 4)}
+        for i, name in enumerate(names)
+    }
+
+
+def _amplitude_constrained(post_burn, names):
+    if "gwb_log10_A" not in names or not len(post_burn):
+        return None
+    lo, hi = GWB_LOG10_A_PRIOR
+    prior_sd = (hi - lo) / np.sqrt(12.0)
+    return bool(np.std(post_burn[:, list(names).index("gwb_log10_A")]) < CONSTRAINED_SD_FRACTION * prior_sd)
+
+
+def _build_joint_pta(
+    pulsars, red_noise_components=10, dm_noise_components=10, gwb_components=10, gwb_gamma=None
+):
     """
     Build a real, joint ``enterprise`` PTA likelihood across every pulsar in
     ``pulsars``: each pulsar's full non-timing-model noise model (per-backend
@@ -206,6 +236,9 @@ def _build_joint_pta(pulsars, red_noise_components=10, dm_noise_components=10, g
         (if present) DM-noise GPs.
     gwb_components : int
         Number of Fourier components for the shared common process.
+    gwb_gamma : float, optional
+        Hold the common process's spectral index fixed at this value
+        (e.g. ``13/3``) instead of sampling it.
 
     Returns
     -------
@@ -222,8 +255,14 @@ def _build_joint_pta(pulsars, red_noise_components=10, dm_noise_components=10, g
     # ranges noise_fit.py uses for a single pulsar's own red noise, reused
     # here for consistency rather than picking a different literature
     # convention.
-    log10_A_gw = parameter.Uniform(-20, -11)("gwb_log10_A")
-    gamma_gw = parameter.Uniform(0, 7)("gwb_gamma")
+    log10_A_gw = parameter.Uniform(*GWB_LOG10_A_PRIOR)("gwb_log10_A")
+    # A fixed spectral index (13/3 for a background from circular,
+    # GW-driven supermassive black-hole binaries) when given; sampling it
+    # with few pulsars just returns the prior.
+    if gwb_gamma is None:
+        gamma_gw = parameter.Uniform(0, 7)("gwb_gamma")
+    else:
+        gamma_gw = parameter.Constant(float(gwb_gamma))("gwb_gamma")
     gwb_prior = gp_priors.powerlaw(log10_A=log10_A_gw, gamma=gamma_gw)
 
     orf = utils.hd_orf()  # must be instantiated - see module docstring.
@@ -282,6 +321,7 @@ def run_gwb_fit(
     dm_noise_components=10,
     gwb_components=10,
     seed=None,
+    gwb_gamma=None,
 ):
     """
     Run a real, joint array-wide GWB common-process fit and write the chain
@@ -303,6 +343,14 @@ def run_gwb_fit(
     gwb_components : int
         Number of Fourier components for the shared common process (the only
         sampled signal in this fixed-noise phase).
+    gwb_gamma : float, optional
+        See :func:`_build_joint_pta`. The report records it under ``fixed``.
+
+    The report's ``amplitude_constrained`` is true when the posterior SD of
+    ``gwb_log10_A`` is below half its prior SD: otherwise the posterior
+    mean mostly reflects the prior (the 5-pulsar IPTA DR2 pilot gave
+    -17.4 +/- 1.6 on a U(-20, -11) prior), and a downstream search should
+    not fix the common process at it without a human deciding to.
 
     Returns
     -------
@@ -343,6 +391,7 @@ def run_gwb_fit(
             red_noise_components=red_noise_components,
             dm_noise_components=dm_noise_components,
             gwb_components=gwb_components,
+            gwb_gamma=gwb_gamma,
         )
     except Exception as exc:
         report = GWBFitReport(
@@ -424,6 +473,14 @@ def run_gwb_fit(
         sampler="PTMCMCSampler",
         status="complete",
         notes=notes,
+        fixed={"gwb_gamma": float(gwb_gamma)} if gwb_gamma is not None else {},
+        summary=_summaries(post_burn, list(pta.param_names)),
+        amplitude_constrained=_amplitude_constrained(post_burn, list(pta.param_names)),
     )
+    if report.amplitude_constrained is False:
+        report.notes.append(
+            "gwb_log10_A is not constrained (posterior SD above half the prior's): its posterior mean mostly "
+            "reflects the prior"
+        )
     report.save(outdir / "gwb_report.yml")
     return report
