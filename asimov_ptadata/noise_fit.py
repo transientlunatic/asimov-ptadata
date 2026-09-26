@@ -150,6 +150,24 @@ class NoiseFitReport:
             yaml.safe_dump(dataclasses.asdict(self), f, sort_keys=False)
 
 
+def ecorr_method_for(psr):
+    """enterprise's ECORR method for this pulsar: ``fast-sherman-morrison``
+    (fastshermanmorrison, ~1.6x faster), unless no backend has an epoch with
+    at least two TOAs - then fastshermanmorrison's constructor fails on the
+    empty epoch list (``np.vstack`` of nothing: "need at least one array to
+    concatenate") and the plain ``sherman-morrison`` method is used instead.
+    Epochs are found exactly as ``EcorrKernelNoise`` finds them (1 s
+    quantisation, at least two TOAs, per backend)."""
+    from enterprise.signals import utils
+
+    flags = np.asarray(psr.backend_flags)
+    for backend in np.unique(flags):
+        umat = utils.create_quantization_matrix(psr.toas[flags == backend], nmin=2)[0]
+        if umat.shape[1] > 0:
+            return "fast-sherman-morrison"
+    return "sherman-morrison"
+
+
 def _build_noise_model(
     red_noise_components=10,
     dm_noise_components=10,
@@ -157,6 +175,7 @@ def _build_noise_model(
     use_dm_noise=True,
     fixed=False,
     selection_fn=None,
+    ecorr_method="fast-sherman-morrison",
 ):
     """
     Build the per-pulsar signal model shared by every pulsar in both the
@@ -212,6 +231,8 @@ def _build_noise_model(
         flags). Overridable so ``gwb_fit._build_joint_pta`` can fall back to
         ``selections.no_selection`` for a *legacy* fixed-noise dict that
         predates per-backend noise support (see that module's docstring).
+    ecorr_method : str
+        enterprise's ``EcorrKernelNoise`` method; see :func:`ecorr_method_for`.
 
     Returns
     -------
@@ -235,7 +256,7 @@ def _build_noise_model(
 
     if use_ecorr:
         log10_ecorr = _param(-10, -5)
-        model += white_signals.EcorrKernelNoise(log10_ecorr=log10_ecorr, selection=selection)
+        model += white_signals.EcorrKernelNoise(log10_ecorr=log10_ecorr, selection=selection, method=ecorr_method)
 
     log10_A = _param(-20, -11)
     gamma = _param(0, 7)
@@ -302,6 +323,7 @@ def _build_pta(
         use_ecorr=use_ecorr,
         use_dm_noise=use_dm_noise,
         fixed=False,
+        ecorr_method=ecorr_method_for(psr),
     )
     pta = signal_base.PTA([model(psr)])
     return psr, pta
@@ -454,14 +476,41 @@ def convergence_summary(chain, names, min_ess=200.0, max_split_shift=0.3):
     return {"min_ess": min_ess, "max_split_shift": max_split_shift, "parameters": per_param}, bool(ok)
 
 
-def _run_ptmcmc(logl, logp, x0, groups, outdir, niter, burn):
+# Initial proposal widths by parameter type (the adaptive proposals take
+# over from these); one 0.1 for everything was far too wide for EFACs and
+# too narrow for spectral indices.
+_PROPOSAL_SCALES = (
+    ("_efac", 0.05),
+    ("_log10_t2equad", 0.2),
+    ("_log10_ecorr", 0.2),
+    ("_gamma", 0.3),
+    ("_log10_A", 0.2),
+)
+
+
+def _proposal_scales(names):
+    return np.array([next((w for suffix, w in _PROPOSAL_SCALES if n.endswith(suffix)), 0.1) for n in names])
+
+
+def _run_ptmcmc(logl, logp, x0, groups, outdir, niter, adapt, names=None):
+    """Run PTMCMCSampler, re-estimating its proposal covariance every
+    ``adapt`` iterations.
+
+    PTMCMCSampler's own ``burn`` sizes its DE-jump buffer and must equal
+    ``covUpdate`` (otherwise ``_updateDEbuffer`` raises partway through), so
+    both are set to ``adapt`` here. That is unrelated to how many samples the
+    caller discards: tying adaptation to the discarded burn-in (5000 of
+    20000) meant the covariance was re-estimated only four times per run,
+    and stage 1's white noise mixed badly (ESS ~10-30).
+    """
     from PTMCMCSampler.PTMCMCSampler import PTSampler
 
     ndim = len(x0)
-    cov = np.diag(np.ones(ndim) * 0.1**2)
+    scales = _proposal_scales(names) if names is not None else np.full(ndim, 0.1)
+    cov = np.diag(scales**2)
     sampler = PTSampler(ndim, logl, logp, cov, groups=groups, outDir=str(outdir), verbose=False)
     sampler.sample(
-        x0, niter, burn=burn, thin=1, isave=max(burn, 1), covUpdate=burn,
+        x0, niter, burn=adapt, thin=1, isave=max(adapt, 1), covUpdate=adapt,
         SCAMweight=30, AMweight=15, DEweight=50,
     )
     chain = np.loadtxt(Path(outdir) / "chain_1.txt")
@@ -523,13 +572,11 @@ def run_noise_fit(
     burn : int
         Number of burn-in iterations, discarded from the posterior mean.
     cov_update : int, optional
-        PTMCMCSampler's ``covUpdate`` (how often the adaptive-metropolis
-        proposal covariance is recomputed). Defaults to ``burn``. This
-        *must* match ``burn`` or PTMCMCSampler's own DE-buffer bookkeeping
-        raises a ``ValueError`` partway through the run (its internal
-        AM-proposal buffer is sized from ``covUpdate``, its DE-jump buffer
-        from ``burn``, and ``_updateDEbuffer`` assumes the two match) -
-        confirmed the hard way while building this pipeline.
+        How often (iterations) the adaptive proposal covariance is
+        re-estimated; defaults to ``min(burn, 1000)``. Independent of
+        ``burn``, which only sets how many samples are discarded - see
+        :func:`_run_ptmcmc` for how PTMCMCSampler's own burn/covUpdate
+        constraint is met.
     red_noise_components, dm_noise_components : int
         Number of red-noise / (if enabled) DM-noise Fourier components.
     use_ecorr : bool
@@ -549,27 +596,7 @@ def run_noise_fit(
     outdir.mkdir(parents=True, exist_ok=True)
 
     if cov_update is None:
-        cov_update = burn
-    elif cov_update != burn:
-        report = NoiseFitReport(
-            pulsar=Path(par_file).stem,
-            ntoas=0,
-            param_names=[],
-            posterior_means=[],
-            n_samples=0,
-            acceptance_fraction=None,
-            sampler="PTMCMCSampler",
-            status="failed",
-            notes=[
-                f"cov_update ({cov_update}) must match burn ({burn}) - "
-                "PTMCMCSampler's DE-jump buffer (sized from burn) and its "
-                "AM-proposal buffer (sized from covUpdate) must agree, or "
-                "_updateDEbuffer raises a ValueError partway through "
-                "sampling. Failing fast here instead of letting that happen."
-            ],
-        )
-        report.save(outdir / "noise_report.yml")
-        return report
+        cov_update = max(1, min(burn, 1000))
 
     pulsar_name = Path(par_file).stem
     notes = []
@@ -614,7 +641,8 @@ def run_noise_fit(
                 + ", ".join(f"{names[i].split('_', 1)[1]}={x0[i]:.2f}" for i in red_dm)
             )
         chain1 = _run_ptmcmc(
-            pta.get_lnlikelihood, pta.get_lnprior, x0, _param_groups(names), outdir / "chain", niter, burn
+            pta.get_lnlikelihood, pta.get_lnprior, x0, _param_groups(names), outdir / "chain", niter,
+            cov_update, names=names,
         )
         post1 = chain1[burn:, :ndim] if chain1.shape[0] > burn else chain1[:, :ndim]
         means = post1.mean(axis=0)
@@ -643,7 +671,8 @@ def run_noise_fit(
             chain2 = _run_ptmcmc(
                 lambda sub: pta.get_lnlikelihood(full(sub)),
                 lambda sub: pta.get_lnprior(full(sub)),
-                means[red_dm], groups2, outdir / "chain_stage2", n2, burn2,
+                means[red_dm], groups2, outdir / "chain_stage2", n2, min(cov_update, burn2),
+                names=[names[i] for i in red_dm],
             )
             post2 = chain2[burn2:, :k] if chain2.shape[0] > burn2 else chain2[:, :k]
             means[red_dm] = post2.mean(axis=0)
