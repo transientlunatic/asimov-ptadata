@@ -133,6 +133,64 @@ HTCondor and Slurm schedulers), and on completion exposes the reduced
 `review status` metadata as a review gate ahead of any downstream noise/GWB
 analysis.
 
+### Noise-fit sampling and convergence
+
+The single-pulsar noise fit (`ptadata-noise` / `asimov_ptadata.noise_fit`)
+samples per-backend white noise plus power-law red/DM noise with
+`PTMCMCSampler`. A single-stage run over every parameter at once, started
+from a random prior draw, is not reliable: on IPTA DR2, J1713+0747's red
+and DM noise (a 121-parameter joint fit) stayed about 4 dex below their DR2
+(`TempoNest`) values after 100000 iterations - log10 A of -17.95 against
+-14.21 - with effective sample sizes of only 3-30. That unmodelled noise
+then leaked into the downstream fixed-noise jerk search as an 11 sigma
+line-of-sight artefact.
+
+The fit is now two-stage by default. Stage 1 samples every parameter,
+started from an **optimised** point rather than a prior draw (white noise
+at nominal values; red/DM hyperparameters at a bounded-Powell likelihood
+maximum), and proposes in **parameter groups** (every parameter; each
+backend's white noise; the red pair; the DM pair; red+DM; all white noise)
+so the few red/DM hyperparameters can move on their own. Stage 2 then
+re-samples just the red/DM hyperparameters with white noise fixed at its
+stage-1 posterior mean - four parameters mix far better alone than inside
+the full model, and they're what the fixed-noise GWB/jerk searches depend
+on most.
+
+Each report now carries a `converged` verdict, from whichever stage
+decided the red/DM values: every one of those parameters must reach an
+effective sample size of at least `min ess` and a split-half (first- vs
+second-half mean) shift of at most `max split shift` posterior standard
+deviations. `ptadata-noise`'s Asimov pipeline only auto-approves a review
+when *every* subject's report has `converged: true` - an unconverged fit,
+or one from before this field existed, is left for a human instead of
+silently carrying bad noise values downstream.
+
+```yaml
+sampler:
+  niter: 20000              # stage 1
+  burn: 5000                # 2000 was too short: stage 1 was still climbing
+  two stage: true
+  stage 2 niter: 20000      # defaults to niter
+  optimise start: true
+  min ess: 200
+  max split shift: 0.3
+  red noise components: 120 # see below
+  dm noise components: 120
+```
+
+The number of Fourier components matters as much as the sampler. With
+30, J1713+0747's sharp DM events could not be modelled, and the fit settled
+on a flat (gamma ~ 0.6) achromatic process at log10 A ~ -12.4 to absorb them.
+With 120 (the `TNRedC`/`TNDMC` IPTA DR2 itself used for this pulsar), the
+likelihood peak moves to red noise log10 A = -14.0, gamma = 3.0, close to
+DR2's own -14.2, 3.5. The same counts must then be used by the fixed-noise
+GWB and jerk searches.
+
+Building the PTA also picks up `fastshermanmorrison-pulsar` (part of the
+`noise` extra) automatically, which made J1713+0747's likelihood evaluation
+about 1.6x faster (84ms vs 132ms) - worth having given how many likelihood
+calls a sampler like this makes.
+
 ## Known releases
 
 `ptadata list-releases` prints the current registry (`asimov_ptadata/sources.py`).
