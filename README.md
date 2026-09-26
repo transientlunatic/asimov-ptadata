@@ -123,6 +123,23 @@ HTCondor and Slurm schedulers), and on completion exposes the reduced
 `review status` metadata as a review gate ahead of any downstream noise/GWB
 analysis.
 
+### GWB search: fixed spectral index and constrained amplitude
+
+`ptadata-gwb` fits one Hellings-Downs-correlated common process across the
+array, with every pulsar's noise held fixed at its `ptadata-noise` values.
+Its spectral index is fixed at 13/3 (a background from circular,
+GW-driven supermassive black-hole binaries) unless the analysis sets
+`sampler: gwb gamma:` to another value, or to `null` to sample it (the
+`gwb-fit` CLI takes `--gwb-gamma` / `--sample-gwb-gamma`). With few
+pulsars, a sampled index just returns its prior.
+
+`gwb_report.yml` records the fixed values (`fixed`), 5/50/95% summaries of
+the sampled parameters (`summary`), and `amplitude_constrained`: whether
+the posterior SD of `gwb_log10_A` is below half its prior SD. When it isn't,
+the posterior mean mostly reflects the U(-20, -11) prior. The 5-pulsar IPTA
+DR2 pilot gave -17.4 +/- 1.6, and a downstream search shouldn't treat that
+as a measured background.
+
 ## Known releases
 
 `ptadata list-releases` prints the current registry (`asimov_ptadata/sources.py`).
