@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from asimov_ptadata.noise_fit import (
+    by_backend_with_epochs,
     ecorr_method_for,
     _initial_point,
     _param_groups,
@@ -248,6 +249,21 @@ class EcorrMethodTests(unittest.TestCase):
     def test_plain_method_when_no_backend_has_an_epoch(self):
         psr = self._psr([0.0, 1e5, 2e5, 3e5], ["A", "A", "B", "B"])
         self.assertEqual(ecorr_method_for(psr), "sherman-morrison")
+
+
+class EcorrSelectionTests(unittest.TestCase):
+    """ECORR only for backends with multi-TOA epochs, where it isn't
+    degenerate with EQUAD."""
+
+    def test_only_backends_with_epochs_get_ecorr(self):
+        toas = np.array([0.0, 0.5, 1e5, 2e5, 3e5, 3e5 + 0.2])
+        flags = np.array(["NG", "NG", "PKS", "PKS", "EFF", "EFF"])
+        selected = by_backend_with_epochs(flags, toas)
+        self.assertEqual(sorted(selected), ["EFF", "NG"])
+        np.testing.assert_array_equal(selected["NG"], flags == "NG")
+
+    def test_no_epochs_no_ecorr(self):
+        self.assertEqual(by_backend_with_epochs(np.array(["A", "B"]), np.array([0.0, 1e5])), {})
 
 
 if __name__ == "__main__":

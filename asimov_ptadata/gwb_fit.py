@@ -214,7 +214,7 @@ def _build_joint_pta(pulsars, red_noise_components=10, dm_noise_components=10, g
     from enterprise.pulsar import Pulsar
     from enterprise.signals import gp_priors, gp_signals, parameter, selections, signal_base, utils
 
-    from .noise_fit import _build_noise_model, ecorr_method_for
+    from .noise_fit import _build_noise_model, ecorr_method_for, has_ecorr_epochs
 
     # Instantiated exactly once, with an explicit shared name - see the
     # module docstring for why this (rather than calling parameter.Uniform()
@@ -249,7 +249,7 @@ def _build_joint_pta(pulsars, red_noise_components=10, dm_noise_components=10, g
         # empty selection key from the parameter name rather than using it
         # as a literal "" prefix - confirmed directly against a real
         # flag-free .tim file while building this.
-        use_ecorr = (not legacy) and any(
+        use_ecorr = (not legacy) and has_ecorr_epochs(psr) and any(
             name == "log10_ecorr" or name.endswith("_log10_ecorr") for name in noise_params
         )
         use_dm_noise = (not legacy) and ("dm_gp_log10_A" in noise_params)

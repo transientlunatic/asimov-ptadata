@@ -150,6 +150,35 @@ class NoiseFitReport:
             yaml.safe_dump(dataclasses.asdict(self), f, sort_keys=False)
 
 
+def by_backend_with_epochs(backend_flags, toas):
+    """enterprise selection: ``by_backend``, but only backends with at least
+    one ECORR epoch (two or more TOAs within enterprise's 1 s quantisation).
+
+    ECORR is only defined by such epochs: for a backend with one TOA per
+    observation it is exactly degenerate with EQUAD, so it is unconstrained
+    - on IPTA DR2's Parkes backends its MAP sat on the prior's upper edge
+    (log10 ECORR = -5, a 10 us "jitter") while the sampled posterior was
+    -7.8 +/- 1.3. IPTA DR2 likewise used ECORR only for NANOGrav's
+    sub-banded TOAs (Antoniadis et al. 2022, sec. 3.1).
+    """
+    from enterprise.signals import utils
+
+    backend_flags = np.asarray(backend_flags)
+    selected = {}
+    for backend in np.unique(backend_flags):
+        mask = backend_flags == backend
+        if utils.create_quantization_matrix(np.asarray(toas)[mask], nmin=2)[0].shape[1] > 0:
+            selected[backend] = mask
+    return selected
+
+
+def has_ecorr_epochs(psr):
+    """Whether any backend of ``psr`` has an ECORR epoch. If none does, the
+    model must leave ECORR out entirely: ``EcorrKernelNoise`` with an empty
+    selection fails (an empty ``np.concatenate``) whichever method it uses."""
+    return bool(by_backend_with_epochs(psr.backend_flags, psr.toas))
+
+
 def ecorr_method_for(psr):
     """enterprise's ECORR method for this pulsar: ``fast-sherman-morrison``
     (fastshermanmorrison, ~1.6x faster), unless no backend has an epoch with
@@ -243,6 +272,9 @@ def _build_noise_model(
 
     if selection_fn is None:
         selection_fn = selections.by_backend
+        ecorr_selection_fn = by_backend_with_epochs
+    else:
+        ecorr_selection_fn = selection_fn
     selection = selections.Selection(selection_fn)
 
     def _param(lo, hi):
@@ -256,7 +288,9 @@ def _build_noise_model(
 
     if use_ecorr:
         log10_ecorr = _param(-10, -5)
-        model += white_signals.EcorrKernelNoise(log10_ecorr=log10_ecorr, selection=selection, method=ecorr_method)
+        model += white_signals.EcorrKernelNoise(
+            log10_ecorr=log10_ecorr, selection=selections.Selection(ecorr_selection_fn), method=ecorr_method
+        )
 
     log10_A = _param(-20, -11)
     gamma = _param(0, 7)
@@ -320,7 +354,7 @@ def _build_pta(
     model = _build_noise_model(
         red_noise_components=red_noise_components,
         dm_noise_components=dm_noise_components,
-        use_ecorr=use_ecorr,
+        use_ecorr=use_ecorr and has_ecorr_epochs(psr),
         use_dm_noise=use_dm_noise,
         fixed=False,
         ecorr_method=ecorr_method_for(psr),

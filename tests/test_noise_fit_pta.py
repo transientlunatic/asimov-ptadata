@@ -65,9 +65,12 @@ def _make_two_backend_fixture(workdir):
     """
     model = pint.models.get_model(pint.config.examplefile("NGC6440E.par"))
 
+    # 430_ASP is sub-banded (two frequencies per observation, like
+    # NANOGrav's data), so it has ECORR epochs; Lwide_PUPPI has one TOA per
+    # observation, so it doesn't.
     toas_a = pint.simulation.make_fake_toas_uniform(
-        55000, 55500, 30, model, freq=1400 * u.MHz, obs="gbt", error=1 * u.us,
-        flags={"fe": "430", "be": "ASP", "f": "430_ASP"},
+        55000, 55500, 30, model, freq=np.array([1400, 1500]) * u.MHz, obs="gbt", error=1 * u.us,
+        multi_freqs_in_epoch=True, flags={"fe": "430", "be": "ASP", "f": "430_ASP"},
     )
     toas_b = pint.simulation.make_fake_toas_uniform(
         55500, 56000, 30, model, freq=800 * u.MHz, obs="gbt", error=1 * u.us,
@@ -115,8 +118,11 @@ class BuildPTATests(unittest.TestCase):
         prefix = "1748-2021E_"
 
         for backend in ("430_ASP", "Lwide_PUPPI"):
-            for suffix in ("efac", "log10_t2equad", "log10_ecorr"):
+            for suffix in ("efac", "log10_t2equad"):
                 self.assertIn(f"{prefix}{backend}_{suffix}", names)
+        # ECORR only where there are multi-TOA epochs.
+        self.assertIn(f"{prefix}430_ASP_log10_ecorr", names)
+        self.assertNotIn(f"{prefix}Lwide_PUPPI_log10_ecorr", names)
 
         self.assertIn(f"{prefix}red_noise_gamma", names)
         self.assertIn(f"{prefix}red_noise_log10_A", names)
@@ -127,6 +133,22 @@ class BuildPTATests(unittest.TestCase):
         # not show up as free PTA parameters at all.
         self.assertFalse(any("linear_timing_model" in name for name in names))
 
+        self._assert_finite_likelihood(pta)
+
+    def test_pulsar_without_ecorr_epochs_gets_no_ecorr(self):
+        # One TOA per observation everywhere: an ECORR signal would have an
+        # empty selection, which enterprise can't evaluate, so it's omitted.
+        model = pint.models.get_model(pint.config.examplefile("NGC6440E.par"))
+        toas = pint.simulation.make_fake_toas_uniform(
+            55000, 56000, 40, model, freq=1400 * u.MHz, obs="gbt", error=1 * u.us,
+            flags={"fe": "L-wide", "be": "PUPPI", "f": "Lwide_PUPPI"},
+        )
+        tim_path = self.workdir / "no-epochs.tim"
+        toas.write_TOA_file(tim_path, format="tempo2")
+
+        _, pta = _build_pta(self.par_path, [tim_path], red_noise_components=5, dm_noise_components=5)
+
+        self.assertFalse(any(name.endswith("log10_ecorr") for name in pta.param_names))
         self._assert_finite_likelihood(pta)
 
     def test_use_ecorr_false_omits_ecorr_params(self):
