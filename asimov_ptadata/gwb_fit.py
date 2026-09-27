@@ -262,6 +262,8 @@ def _build_joint_pta(pulsars, red_noise_components=10, dm_noise_components=10, g
             fixed=True,
             selection_fn=selections.no_selection if legacy else None,
             ecorr_method=ecorr_method_for(psr),
+            # A noise fit with white noise: par uses TempoNest's EQUAD convention.
+            equad_convention="tn" if any(k.endswith("_log10_tnequad") for k in noise_params) else "t2",
         )
         model = noise_model + gwb
         signalcollections.append(model(psr))

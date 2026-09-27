@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from asimov_ptadata.noise_fit import (
+    tempo_nest_white_noise,
     by_backend_with_epochs,
     ecorr_method_for,
     _initial_point,
@@ -264,6 +265,20 @@ class EcorrSelectionTests(unittest.TestCase):
 
     def test_no_epochs_no_ecorr(self):
         self.assertEqual(by_backend_with_epochs(np.array(["A", "B"]), np.array([0.0, 1e5])), {})
+
+
+class TempoNestWhiteNoiseTests(unittest.TestCase):
+    def test_parses_tnef_tneq_tnecorr_by_group(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as d:
+            par = Path(d) / "p.par"
+            par.write_text("PSR J0000\nTNEF -group A 1.1\nTNEQ -group A -6.4\nTNECORR -group A 0.12\n"
+                           "EFAC -f A 1.5\nTNRedAmp -14.2\n")
+            values = tempo_nest_white_noise(par)
+        self.assertEqual(set(values), {"A_efac", "A_log10_tnequad", "A_log10_ecorr"})
+        self.assertAlmostEqual(values["A_log10_ecorr"], np.log10(0.12e-6))
 
 
 if __name__ == "__main__":

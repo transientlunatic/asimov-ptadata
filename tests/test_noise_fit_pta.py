@@ -207,6 +207,29 @@ class RunNoiseFitTests(unittest.TestCase):
         )
         self.assertTrue(any("MAP" in n for n in report.notes))
 
+    def test_par_mode_fixes_white_noise_at_the_par_files_tempo_nest_values(self):
+        import shutil as _shutil
+
+        from asimov_ptadata.noise_fit import run_noise_fit
+
+        par = self.workdir / "with-tn.par"
+        _shutil.copy(self.par_path, par)
+        with open(par, "a") as f:
+            f.write("TNEF -group 430_ASP 1.2\nTNEQ -group 430_ASP -6.5\nTNECORR -group 430_ASP 0.5\n")
+        outdir = self.workdir / "par"
+        report = run_noise_fit(
+            par, [self.tim_path], outdir, niter=300, burn=100, stage2_niter=300,
+            red_noise_components=5, dm_noise_components=5, seed=1, white_noise="par",
+        )
+        self.assertEqual(report.status, "complete", report.notes)
+        values = dict(zip(report.param_names, report.posterior_means))
+        self.assertAlmostEqual(values["1748-2021E_430_ASP_efac"], 1.2)
+        self.assertAlmostEqual(values["1748-2021E_430_ASP_log10_tnequad"], -6.5)
+        self.assertAlmostEqual(values["1748-2021E_430_ASP_log10_ecorr"], np.log10(0.5e-6))
+        # Lwide_PUPPI has no TN values in the par file: MAP for those.
+        self.assertIn("1748-2021E_Lwide_PUPPI_efac", values)
+        self.assertTrue(any("TempoNest" in n and "Lwide_PUPPI" in n for n in report.notes))
+
     def test_sample_mode_runs_both_stages(self):
         report, outdir = self._run("sample")
         self.assertEqual(report.convergence["white noise"], "sample")

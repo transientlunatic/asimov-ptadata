@@ -172,6 +172,28 @@ def by_backend_with_epochs(backend_flags, toas):
     return selected
 
 
+def tempo_nest_white_noise(par_file):
+    """White noise from a par file's TempoNest lines, keyed as the
+    ``equad_convention="tn"`` model names its parameters (without the pulsar
+    prefix): ``TNEF -group G v`` -> ``G_efac``; ``TNEQ -group G v`` (log10 s)
+    -> ``G_log10_tnequad``; ``TNECORR -group G v`` (microseconds, linear) ->
+    ``G_log10_ecorr``. IPTA DR2 VersionB par files carry these, re-estimated
+    for the combined data."""
+    values = {}
+    for line in Path(par_file).read_text(errors="replace").splitlines():
+        fields = line.split()
+        if len(fields) < 4 or fields[1] != "-group":
+            continue
+        key, group, value = fields[0], fields[2], float(fields[3])
+        if key == "TNEF":
+            values[f"{group}_efac"] = value
+        elif key == "TNEQ":
+            values[f"{group}_log10_tnequad"] = value
+        elif key == "TNECORR" and value > 0:
+            values[f"{group}_log10_ecorr"] = float(np.log10(value * 1e-6))
+    return values
+
+
 def has_ecorr_epochs(psr):
     """Whether any backend of ``psr`` has an ECORR epoch. If none does, the
     model must leave ECORR out entirely: ``EcorrKernelNoise`` with an empty
@@ -205,6 +227,7 @@ def _build_noise_model(
     fixed=False,
     selection_fn=None,
     ecorr_method="fast-sherman-morrison",
+    equad_convention="t2",
 ):
     """
     Build the per-pulsar signal model shared by every pulsar in both the
@@ -262,6 +285,10 @@ def _build_noise_model(
         predates per-backend noise support (see that module's docstring).
     ecorr_method : str
         enterprise's ``EcorrKernelNoise`` method; see :func:`ecorr_method_for`.
+    equad_convention : {"t2", "tn"}
+        ``"t2"`` (default): EQUAD inside the EFAC scaling (``log10_t2equad``).
+        ``"tn"``: TempoNest's, EQUAD added outside it (``log10_tnequad``) -
+        the convention of a par file's ``TNEQ`` values.
 
     Returns
     -------
@@ -283,8 +310,14 @@ def _build_noise_model(
     model = gp_signals.TimingModel(use_svd=True)
 
     efac = _param(0.1, 5.0)
-    log10_t2equad = _param(-10, -5)
-    model += white_signals.MeasurementNoise(efac=efac, log10_t2equad=log10_t2equad, selection=selection)
+    if equad_convention == "tn":
+        # TempoNest: sigma^2 -> EFAC^2 sigma^2 + EQUAD^2 (EQUAD outside EFAC).
+        model += white_signals.MeasurementNoise(efac=efac, log10_t2equad=None, selection=selection)
+        model += white_signals.TNEquadNoise(log10_tnequad=_param(-10, -5), selection=selection)
+    else:
+        # tempo2/enterprise: sigma^2 -> EFAC^2 (sigma^2 + EQUAD^2).
+        log10_t2equad = _param(-10, -5)
+        model += white_signals.MeasurementNoise(efac=efac, log10_t2equad=log10_t2equad, selection=selection)
 
     if use_ecorr:
         log10_ecorr = _param(-10, -5)
@@ -316,6 +349,8 @@ def _build_pta(
     dm_noise_components=10,
     use_ecorr=True,
     use_dm_noise=True,
+
+    equad_convention="t2",
 ):
     """
     Build a real, single-pulsar ``enterprise`` PTA likelihood: a
@@ -357,6 +392,7 @@ def _build_pta(
         use_ecorr=use_ecorr and has_ecorr_epochs(psr),
         use_dm_noise=use_dm_noise,
         fixed=False,
+        equad_convention=equad_convention,
         ecorr_method=ecorr_method_for(psr),
     )
     pta = signal_base.PTA([model(psr)])
@@ -368,7 +404,7 @@ def _build_pta(
 # convergence diagnostics.
 # ---------------------------------------------------------------------------
 
-_WHITE_SUFFIXES = ("_efac", "_log10_t2equad", "_log10_ecorr")
+_WHITE_SUFFIXES = ("_efac", "_log10_t2equad", "_log10_tnequad", "_log10_ecorr")
 
 
 def _is_white(name):
@@ -527,6 +563,7 @@ def convergence_summary(chain, names, min_ess=200.0, max_split_shift=0.3):
 _PROPOSAL_SCALES = (
     ("_efac", 0.05),
     ("_log10_t2equad", 0.2),
+    ("_log10_tnequad", 0.2),
     ("_log10_ecorr", 0.2),
     ("_gamma", 0.3),
     ("_log10_A", 0.2),
@@ -639,7 +676,7 @@ def run_noise_fit(
         Seed for the initial-sample RNG, for reproducibility.
     two_stage, stage2_niter, optimise_start, min_ess, max_split_shift
         See above.
-    white_noise : {"map", "sample"}
+    white_noise : {"map", "par", "sample"}
         ``"map"`` (the default): skip stage 1 and fix the white noise at its
         MAP, found by running :func:`_initial_point`'s coordinate ascent to a
         tolerance; stage 2 samples the red/DM noise. ``"sample"``: stage 1
@@ -648,7 +685,12 @@ def run_noise_fit(
         ESS ~10 after 20000 iterations - while the red/DM noise the
         downstream searches depend on came out the same either way (log10 A
         within ~0.05); the MAP ignores white-noise uncertainty, as PTA noise
-        analyses commonly do.
+        analyses commonly do. ``"par"``: like ``"map"``, but the white
+        noise is fixed at the par file's own TempoNest values
+        (:func:`tempo_nest_white_noise`; EQUAD in TempoNest's convention),
+        falling back to the MAP for any parameter the par file lacks. For
+        IPTA DR2 these are the collaboration's single-pulsar estimates, and
+        they agree with our sampled posteriors where our MAP does not.
 
     Returns
     -------
@@ -671,6 +713,7 @@ def run_noise_fit(
             dm_noise_components=dm_noise_components,
             use_ecorr=use_ecorr,
             use_dm_noise=use_dm_noise,
+            equad_convention="tn" if white_noise == "par" else "t2",
         )
     except Exception as exc:
         report = NoiseFitReport(
@@ -696,7 +739,7 @@ def run_noise_fit(
     red_dm = [i for i, n in enumerate(names) if not _is_white(n)]
 
     # Nothing to fix (or nothing but white noise): sample everything.
-    if white_noise == "map" and not (red_dm and len(red_dm) < ndim):
+    if white_noise in ("map", "par") and not (red_dm and len(red_dm) < ndim):
         white_noise = "sample"
 
     try:
@@ -707,6 +750,27 @@ def run_noise_fit(
             notes.append(
                 "white noise fixed at its MAP (coordinate ascent, "
                 f"to dlnpost < {MAP_TOL}); stage 1 not run"
+            )
+            run_stage2 = True
+        elif white_noise == "par":
+            # The par file's own (TempoNest) white noise, where it has a value;
+            # the MAP for any parameter it doesn't cover.
+            x0 = _initial_point(pta, x0, rounds=MAP_MAX_ROUNDS, tol=MAP_TOL)
+            prefix = f"{psr.name}_"
+            par_values = tempo_nest_white_noise(par_file)
+            used = []
+            for i, name in enumerate(names):
+                key = name[len(prefix):] if name.startswith(prefix) else name
+                if _is_white(name) and key in par_values:
+                    lo, hi = _bounds(pta.params[i])
+                    x0[i] = min(max(par_values[key], lo), hi)
+                    used.append(name)
+            missing = [n for n in names if _is_white(n) and n not in used]
+            means = x0.copy()
+            notes.append(
+                f"white noise fixed at the par file's TempoNest values for {len(used)} parameter(s)"
+                + (f"; MAP for {len(missing)}: {', '.join(m[len(prefix):] for m in missing)}" if missing else "")
+                + "; stage 1 not run"
             )
             run_stage2 = True
         else:

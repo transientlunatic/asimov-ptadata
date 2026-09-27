@@ -130,8 +130,8 @@ def run(settings_file):
 @click.option("--min-ess", default=200.0, show_default=True)
 @click.option("--max-split-shift", default=0.3, show_default=True)
 @click.option(
-    "--white-noise", type=click.Choice(["map", "sample"]), default="map", show_default=True,
-    help="Fix white noise at its MAP (map) or sample it in stage 1 (sample).",
+    "--white-noise", type=click.Choice(["map", "par", "sample"]), default="map", show_default=True,
+    help="Fix white noise at its MAP (map) or the par file's TempoNest values (par), or sample it (sample).",
 )
 def noise_fit(
     par_file, tim_files, outdir, niter, burn, red_noise_components, dm_noise_components, use_ecorr, use_dm_noise,
