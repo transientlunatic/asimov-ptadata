@@ -246,6 +246,8 @@ def _build_noise_model(
     ecorr_groups=None,
 
     dm_dips=None,
+
+    vary_red_dm=False,
 ):
     """
     Build the per-pulsar signal model shared by every pulsar in both the
@@ -303,6 +305,10 @@ def _build_noise_model(
         predates per-backend noise support (see that module's docstring).
     ecorr_method : str
         enterprise's ``EcorrKernelNoise`` method; see :func:`ecorr_method_for`.
+    vary_red_dm : bool
+        With ``fixed=True``, still sample the red- and DM-noise
+        hyperparameters (white noise and DM dips stay fixed): the per-pulsar
+        noise model of a joint GWB/jerk search (new-nearest-co#9).
     dm_dips : list of (t_min, t_max), optional
         One deterministic exponential DM dip per window (MJD) for the dip
         epoch's prior; see :func:`_dm_dip_signal`.
@@ -350,16 +356,21 @@ def _build_noise_model(
             log10_ecorr=log10_ecorr, selection=selections.Selection(ecorr_selection_fn), method=ecorr_method
         )
 
-    log10_A = _param(-20, -11)
-    gamma = _param(0, 7)
+    def _rd_param(lo, hi):
+        # vary_red_dm: red/DM noise sampled even in a fixed model (a joint
+        # GWB-style fit), while white noise and DM dips stay fixed.
+        return parameter.Uniform(lo, hi) if (not fixed or vary_red_dm) else parameter.Constant()
+
+    log10_A = _rd_param(-20, -11)
+    gamma = _rd_param(0, 7)
     powerlaw = gp_priors.powerlaw(log10_A=log10_A, gamma=gamma)
     model += gp_signals.FourierBasisGP(powerlaw, components=red_noise_components)
 
     if use_dm_noise:
         from enterprise.signals import utils
 
-        log10_A_dm = _param(-20, -11)
-        gamma_dm = _param(0, 7)
+        log10_A_dm = _rd_param(-20, -11)
+        gamma_dm = _rd_param(0, 7)
         dm_powerlaw = gp_priors.powerlaw(log10_A=log10_A_dm, gamma=gamma_dm)
         dm_basis = utils.createfourierdesignmatrix_dm(nmodes=dm_noise_components)
         model += gp_signals.BasisGP(dm_powerlaw, dm_basis, name="dm_gp")

@@ -173,6 +173,8 @@ class GWBFitReport:
     # the sampled ones, and whether the data constrain the amplitude well
     # enough for a downstream search to fix it at the posterior mean.
     fixed: dict | None = None
+    convergence: dict | None = None
+    converged: bool | None = None
     summary: dict | None = None
     amplitude_constrained: bool | None = None
 
@@ -209,6 +211,10 @@ def _amplitude_constrained(post_burn, names):
 
 def _build_joint_pta(
     pulsars, red_noise_components=10, dm_noise_components=10, gwb_components=10, gwb_gamma=None
+,
+    vary_pulsar_noise=False,
+
+    orf="hd",
 ):
     """
     Build a real, joint ``enterprise`` PTA likelihood across every pulsar in
@@ -265,12 +271,18 @@ def _build_joint_pta(
         gamma_gw = parameter.Constant(float(gwb_gamma))("gwb_gamma")
     gwb_prior = gp_priors.powerlaw(log10_A=log10_A_gw, gamma=gamma_gw)
 
-    orf = utils.hd_orf()  # must be instantiated - see module docstring.
-    gwb = gp_signals.FourierBasisCommonGP(gwb_prior, orf, components=gwb_components, name="gw")
+    if orf == "curn":
+        # Common spectrum, no inter-pulsar correlations: the same shared
+        # parameters in every pulsar's own Fourier GP.
+        gwb = gp_signals.FourierBasisGP(gwb_prior, components=gwb_components, name="gw")
+    else:
+        hd = utils.hd_orf()  # must be instantiated - see module docstring.
+        gwb = gp_signals.FourierBasisCommonGP(gwb_prior, hd, components=gwb_components, name="gw")
 
     psrs = []
     signalcollections = []
     fixed_values = {}
+    start_values = {}
     for entry in pulsars:
         tim_files = _as_tim_list(entry["tim"])
         tim_arg = [str(t) for t in tim_files] if len(tim_files) > 1 else str(tim_files[0])
@@ -302,6 +314,7 @@ def _build_joint_pta(
             selection_fn=selections.no_selection if legacy else None,
             ecorr_method=ecorr_method_for(psr),
             ecorr_groups=None if legacy else ecorr_groups_of(noise_params),
+            vary_red_dm=vary_pulsar_noise,
             dm_dips=dm_dips_of(noise_params),
             # A noise fit with white noise: par uses TempoNest's EQUAD convention.
             equad_convention="tn" if any(k.endswith("_log10_tnequad") for k in noise_params) else "t2",
@@ -309,11 +322,21 @@ def _build_joint_pta(
         model = noise_model + gwb
         signalcollections.append(model(psr))
 
-        fixed_values.update({f"{psr.name}_{name}": value for name, value in noise_params.items()})
+        fixed_values.update({
+            f"{psr.name}_{name}": value for name, value in noise_params.items()
+            if not (vary_pulsar_noise and _is_red_dm(name))
+        })
+        start_values.update({f"{psr.name}_{name}": value for name, value in noise_params.items()})
 
     pta = signal_base.PTA(signalcollections)
     pta.set_default_params(fixed_values)
+    # Where sampling starts for the per-pulsar red/DM noise: its noise fit.
+    pta.start_values = start_values
     return psrs, pta
+
+
+def _is_red_dm(name):
+    return name.startswith(("red_noise_", "dm_gp_"))
 
 
 def run_gwb_fit(
@@ -327,6 +350,10 @@ def run_gwb_fit(
     gwb_components=10,
     seed=None,
     gwb_gamma=None,
+
+    vary_pulsar_noise=False,
+
+    orf="hd",
 ):
     """
     Run a real, joint array-wide GWB common-process fit and write the chain
@@ -365,27 +392,7 @@ def run_gwb_fit(
     outdir.mkdir(parents=True, exist_ok=True)
 
     if cov_update is None:
-        cov_update = burn
-    elif cov_update != burn:
-        report = GWBFitReport(
-            pulsars=[p["name"] for p in pulsars],
-            ntoas={},
-            param_names=[],
-            posterior_means=[],
-            n_samples=0,
-            acceptance_fraction=None,
-            sampler="PTMCMCSampler",
-            status="failed",
-            notes=[
-                f"cov_update ({cov_update}) must match burn ({burn}) - "
-                "PTMCMCSampler's DE-jump buffer (sized from burn) and its "
-                "AM-proposal buffer (sized from covUpdate) must agree, or "
-                "_updateDEbuffer raises a ValueError partway through "
-                "sampling. Failing fast here instead of letting that happen."
-            ],
-        )
-        report.save(outdir / "gwb_report.yml")
-        return report
+        cov_update = max(1, min(burn, 1000))
 
     pulsar_names = [p["name"] for p in pulsars]
     notes = []
@@ -397,6 +404,8 @@ def run_gwb_fit(
             dm_noise_components=dm_noise_components,
             gwb_components=gwb_components,
             gwb_gamma=gwb_gamma,
+            vary_pulsar_noise=vary_pulsar_noise,
+            orf=orf,
         )
     except Exception as exc:
         report = GWBFitReport(
@@ -413,30 +422,29 @@ def run_gwb_fit(
         report.save(outdir / "gwb_report.yml")
         return report
 
-    from PTMCMCSampler.PTMCMCSampler import PTSampler
+    from .noise_fit import _run_ptmcmc
 
     rng = np.random.default_rng(seed)
     x0 = np.hstack([p.sample() for p in pta.params]) if seed is None else np.hstack(
         [_sample_with_rng(p, rng) for p in pta.params]
     )
+    names = list(pta.param_names)
+    starts = getattr(pta, "start_values", {})
+    x0 = np.array([starts.get(n, v) for n, v in zip(names, x0)], dtype=float)
     ndim = len(x0)
-    cov = np.diag(np.ones(ndim) * 0.1**2)
+    # Jump groups: everything; the common process; each pulsar's red/DM noise.
+    common = [i for i, n in enumerate(names) if n.startswith("gwb_")]
+    per_psr = {}
+    for i, n in enumerate(names):
+        if not n.startswith("gwb_"):
+            per_psr.setdefault(n.split("_", 1)[0], []).append(i)
+    groups = [list(range(ndim))] + [g for g in [common, *per_psr.values()] if g and len(g) < ndim]
 
     chain_dir = outdir / "chain"
     try:
-        sampler = PTSampler(ndim, pta.get_lnlikelihood, pta.get_lnprior, cov, outDir=str(chain_dir))
-        sampler.sample(
-            x0,
-            niter,
-            burn=burn,
-            thin=1,
-            isave=max(burn, 1),
-            covUpdate=cov_update,
-            SCAMweight=30,
-            AMweight=15,
-            DEweight=50,
+        chain = _run_ptmcmc(
+            pta.get_lnlikelihood, pta.get_lnprior, x0, groups, chain_dir, niter, cov_update, names=names,
         )
-        chain = np.loadtxt(chain_dir / "chain_1.txt")
     except Exception as exc:
         # Same reasoning as noise_fit.run_noise_fit's own sampling try/except:
         # Asimov's detect_completion() just polls for gwb_report.yml's
@@ -482,6 +490,9 @@ def run_gwb_fit(
         summary=_summaries(post_burn, list(pta.param_names)),
         amplitude_constrained=_amplitude_constrained(post_burn, list(pta.param_names)),
     )
+    from .noise_fit import convergence_summary
+
+    report.convergence, report.converged = convergence_summary(post_burn, list(pta.param_names))
     if report.amplitude_constrained is False:
         report.notes.append(
             "gwb_log10_A is not constrained (posterior SD above half the prior's): its posterior mean mostly "
