@@ -83,15 +83,16 @@ def _is_tempo2_toa(fields):
 def normalise_tim_line(line):
     """Rewrite one tempo2 ``.tim`` line so PINT reads it the way tempo2 does.
 
-    Returns ``(line, commented, dropped_flags)``. See
-    :func:`normalise_tim_files` for the two rules applied.
+    Returns ``(line, commented, dropped_flags, addsat)``, where ``addsat`` is
+    the ``-addsat`` offset (seconds) folded into ``-to``, or None if the line
+    had none. See :func:`normalise_tim_files` for the rules applied.
     """
     if line.startswith("C") and len(line) > 1 and not line[1].isspace() and not line.startswith("CC "):
-        return "C " + line, True, []
+        return "C " + line, True, [], None
 
     fields = line.split()
     if not _is_tempo2_toa(fields):
-        return line, False, []
+        return line, False, [], None
 
     flags = fields[5:]
     kept, dropped = [], []
@@ -104,16 +105,43 @@ def normalise_tim_line(line):
             continue
         kept.append(token)
         i += 1
-    if not dropped:
-        return line, False, []
+    kept, addsat = _fold_addsat_into_to(kept)
+    if not dropped and addsat is None:
+        return line, False, [], None
     ending = line[len(line.rstrip("\r\n")):]
-    return " ".join(fields[:5] + kept) + ending, False, dropped
+    return " ".join(fields[:5] + kept) + ending, False, dropped, addsat
+
+
+def _fold_addsat_into_to(flags):
+    """Replace ``-addsat X`` with an equivalent ``-to`` time offset.
+
+    tempo2 adds ``-addsat`` (seconds) to the site arrival time; PINT ignores
+    the flag but applies ``-to`` (seconds) to the arrival time along with
+    the clock corrections, so the two are summed into a single ``-to``.
+    """
+    names = flags[0::2]
+    if "-addsat" not in names or len(flags) % 2:
+        return flags, None
+    pairs = dict(zip(flags[0::2], flags[1::2]))
+    try:
+        addsat = float(pairs["-addsat"])
+        offset = addsat + float(pairs.get("-to", 0.0))
+    except ValueError:
+        return flags, None
+    out = []
+    for name, value in zip(flags[0::2], flags[1::2]):
+        if name == "-addsat":
+            continue
+        out += [name, repr(offset) if name == "-to" else value]
+    if "-to" not in pairs and offset != 0.0:
+        out += ["-to", repr(offset)]
+    return out, addsat
 
 
 def normalise_tim_files(paths):
     """Normalise staged tempo2 ``.tim`` files in place for PINT.
 
-    Two tempo2 conventions that real releases (IPTA DR2 in particular) rely
+    Three tempo2 conventions that real releases (IPTA DR2 in particular) rely
     on are read differently by PINT, so they are rewritten in the *staged*
     copies - never in the release checkout itself:
 
@@ -133,11 +161,20 @@ def normalise_tim_files(paths):
       of them, shifts every later flag, or fails to parse). A valueless
       flag carries no information, so it is dropped.
 
-    Both behaviours were checked against tempo2 itself. Only lines that
+    - **``-addsat`` arrival-time corrections** (``... -addsat -1``). tempo2
+      adds the flag's value, in seconds, to the site arrival time; IPTA DR2
+      uses it to correct 1-second timestamp errors on some Effelsberg TOAs.
+      PINT ignores it, leaving those TOAs a second out - residuals of up to
+      half a pulse period once folded. It is replaced with PINT's ``-to``
+      time offset (seconds, applied with the clock corrections), summed
+      with any ``-to`` already on the line.
+
+    All three behaviours were checked against tempo2 itself. Only lines that
     need it are rewritten. Returns a dict with the number of TOAs commented
-    out and valueless flags dropped, and the files changed.
+    out, valueless flags dropped and ``-addsat`` corrections converted, and
+    the files changed.
     """
-    summary = {"commented TOAs": 0, "valueless flags dropped": 0, "files changed": []}
+    summary = {"commented TOAs": 0, "valueless flags dropped": 0, "addsat corrections": 0, "files changed": []}
     for path in paths:
         path = Path(path)
         # latin-1 round-trips any byte, so nothing else in the file changes.
@@ -145,12 +182,13 @@ def normalise_tim_files(paths):
             lines = f.readlines()
         changed = False
         for i, line in enumerate(lines):
-            new, commented, dropped = normalise_tim_line(line)
+            new, commented, dropped, addsat = normalise_tim_line(line)
             if new != line:
                 lines[i] = new
                 changed = True
                 summary["commented TOAs"] += int(commented)
                 summary["valueless flags dropped"] += len(dropped)
+                summary["addsat corrections"] += int(addsat is not None)
         if changed:
             with open(path, "w", encoding="latin-1", newline="") as f:
                 f.writelines(lines)
@@ -168,6 +206,11 @@ def normalisation_notes(summary):
         )
     if summary["valueless flags dropped"]:
         notes.append(f"{summary['valueless flags dropped']} valueless TOA flag(s) were dropped while staging")
+    if summary.get("addsat corrections"):
+        notes.append(
+            f"{summary['addsat corrections']} -addsat arrival-time correction(s) were converted to -to time "
+            "offsets while staging"
+        )
     return notes
 
 

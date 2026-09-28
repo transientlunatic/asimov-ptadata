@@ -137,9 +137,9 @@ TOA = "c015621.align.pazr.30min 1419.557 51849.5401158655181   0.252  g   -pta E
     ],
 )
 def test_tempo2_style_commented_toa_becomes_a_pint_comment(line):
-    new, commented, dropped = normalise_tim_line(line)
+    new, commented, dropped, addsat = normalise_tim_line(line)
     assert new == "C " + line
-    assert commented and dropped == []
+    assert commented and dropped == [] and addsat is None
 
 
 @pytest.mark.parametrize(
@@ -156,12 +156,12 @@ def test_tempo2_style_commented_toa_becomes_a_pint_comment(line):
     ],
 )
 def test_lines_pint_already_reads_like_tempo2_are_untouched(line):
-    assert normalise_tim_line(line) == (line, False, [])
+    assert normalise_tim_line(line) == (line, False, [], None)
 
 
 def test_valueless_flags_are_dropped():
     line = "m2005.rf 1403.775 53430.916 0.901 pks -f MULTI -projid -beconfig -odd -snr 70.99 -padd -0.085 -end\n"
-    new, commented, dropped = normalise_tim_line(line)
+    new, commented, dropped, _ = normalise_tim_line(line)
     assert new == "m2005.rf 1403.775 53430.916 0.901 pks -f MULTI -snr 70.99 -padd -0.085\n"
     assert not commented
     assert dropped == ["-projid", "-beconfig", "-odd", "-end"]
@@ -170,10 +170,10 @@ def test_valueless_flags_are_dropped():
 def test_normalised_lines_parse_in_pint_as_tempo2_reads_them():
     from pint.toa import _parse_TOA_line
 
-    commented, _, _ = normalise_tim_line("C???? " + TOA)
+    commented, _, _, _ = normalise_tim_line("C???? " + TOA)
     assert _parse_TOA_line(commented)[1]["format"] == "Comment"
 
-    flagged, _, _ = normalise_tim_line(TOA.rstrip("\n") + " -projid -snr 70.99 -gof 1.1\n")
+    flagged, _, _, _ = normalise_tim_line(TOA.rstrip("\n") + " -projid -snr 70.99 -gof 1.1\n")
     flags = _parse_TOA_line(flagged, fmt="Tempo2")[1]
     assert flags["snr"] == "70.99" and flags["gof"] == "1.1" and "projid" not in flags
 
@@ -200,5 +200,53 @@ def test_fetch_pulsar_normalises_staged_includes_not_the_release(tmp_path):
 
 def test_clean_release_is_staged_byte_for_byte(release_dir, tmp_path):
     manifest = fetch_pulsar("J1713+0747", release_dir, tmp_path / "staged")
-    assert manifest["tim normalisation"] == {"commented TOAs": 0, "valueless flags dropped": 0, "files changed": []}
+    assert manifest["tim normalisation"] == {
+        "commented TOAs": 0, "valueless flags dropped": 0, "addsat corrections": 0, "files changed": []
+    }
     assert normalisation_notes(manifest["tim normalisation"]) == []
+
+
+@pytest.mark.parametrize(
+    "flags, expected, addsat",
+    [
+        ("-pta EPTA -addsat -1", "-pta EPTA -to -1.0", -1.0),
+        ("-addsat +1 -pta EPTA", "-pta EPTA -to 1.0", 1.0),
+        ("-to -0.897e-6 -addsat -1 -pta EPTA", "-to -1.000000897 -pta EPTA", -1.0),
+        ("-pta EPTA -addsat +0", "-pta EPTA", 0.0),
+    ],
+)
+def test_addsat_becomes_a_to_time_offset(flags, expected, addsat):
+    base = "c058575.align.pazr.30min 1353.499 56178.827511671731325 0.5 g"
+    new, commented, dropped, applied = normalise_tim_line(f"{base} {flags}\n")
+    assert new == f"{base} {expected}\n"
+    assert applied == addsat and not commented and dropped == []
+
+
+def test_pint_applies_the_converted_addsat_like_tempo2(tmp_path):
+    """tempo2 moves a TOA by -addsat seconds (checked: -addsat -1 moves the
+    SAT by exactly 1.0000 s); after conversion PINT must move it the same."""
+    import shutil
+
+    import pint.config
+    import pint.models
+    import pint.toa
+
+    par = tmp_path / "example.par"
+    shutil.copy(pint.config.examplefile("NGC6440E.par"), par)
+    # A tempo2-format TOA at the barycentre ("@"), so no clock files are needed;
+    # PINT still applies -to there.
+    toa_line = "fake.ar 1949.609 53478.2858714192189 21.71 @"
+    model = pint.models.get_model(str(par))
+
+    def mjd(flags):
+        tim = tmp_path / "one.tim"
+        tim.write_text("FORMAT 1\n" + normalise_tim_line(f"{toa_line} {flags}\n")[0])
+        return pint.toa.get_TOAs(str(tim), model=model).table["mjd"][0]
+
+    shift_s = (mjd("-addsat -1") - mjd("-pta X")).to_value("s")
+    assert shift_s == pytest.approx(-1.0, abs=1e-9)
+
+
+def test_addsat_corrections_are_noted():
+    notes = normalisation_notes({"commented TOAs": 0, "valueless flags dropped": 0, "addsat corrections": 2})
+    assert notes == ["2 -addsat arrival-time correction(s) were converted to -to time offsets while staging"]
