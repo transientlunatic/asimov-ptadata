@@ -244,6 +244,8 @@ def _build_noise_model(
     ecorr_method="fast-sherman-morrison",
     equad_convention="t2",
     ecorr_groups=None,
+
+    dm_dips=None,
 ):
     """
     Build the per-pulsar signal model shared by every pulsar in both the
@@ -301,6 +303,9 @@ def _build_noise_model(
         predates per-backend noise support (see that module's docstring).
     ecorr_method : str
         enterprise's ``EcorrKernelNoise`` method; see :func:`ecorr_method_for`.
+    dm_dips : list of (t_min, t_max), optional
+        One deterministic exponential DM dip per window (MJD) for the dip
+        epoch's prior; see :func:`_dm_dip_signal`.
     ecorr_groups : collection of str, optional
         Restrict ECORR to these backends (still only those with epochs): the
         par file's ``TNECORR`` groups for ``white_noise="par"``, or the
@@ -359,7 +364,47 @@ def _build_noise_model(
         dm_basis = utils.createfourierdesignmatrix_dm(nmodes=dm_noise_components)
         model += gp_signals.BasisGP(dm_powerlaw, dm_basis, name="dm_gp")
 
+    for k, (t_min, t_max) in enumerate(dm_dips or [], start=1):
+        model += _dm_dip_signal(k, t_min, t_max, fixed)
+
     return model
+
+
+def _dm_dip_signal(k, t_min, t_max, fixed):
+    """A deterministic exponential DM dip: at epoch t0 the DM drops, then
+    recovers exponentially over tau, giving a delay scaling as nu^-2,
+
+        delay = -10**log10_Amp * H(t - t0) * exp(-(t - t0) / tau) * (1400 MHz / nu)**2.
+
+    Sharp DM events like J1713+0747's (MJD ~54750) are not power-law noise:
+    with 30 Fourier components a flat achromatic process absorbed it, and
+    even with 120 the DM power law steepens to absorb it. IPTA DR2 modelled
+    it this way (Antoniadis et al. 2022, sec. 3.1). Parameters are named
+    ``dmexp_<k>_log10_Amp``, ``dmexp_<k>_t0`` (MJD, prior U(t_min, t_max))
+    and ``dmexp_<k>_log10_tau`` (days).
+    """
+    from enterprise.signals import deterministic_signals, parameter, signal_base
+
+    @signal_base.function
+    def dm_dip(toas, freqs, log10_Amp=-6.0, t0=54750.0, log10_tau=1.5):
+        dt = toas - t0 * 86400.0
+        tau = 10**log10_tau * 86400.0
+        profile = np.where(dt >= 0, np.exp(-np.clip(dt, 0, None) / tau), 0.0)
+        return -(10**log10_Amp) * profile * (1400.0 / freqs) ** 2
+
+    def prior(lo, hi):
+        return parameter.Constant() if fixed else parameter.Uniform(lo, hi)
+
+    waveform = dm_dip(log10_Amp=prior(-10, -2), t0=prior(t_min, t_max), log10_tau=prior(0, 2.5))
+    return deterministic_signals.Deterministic(waveform, name=f"dmexp_{k}")
+
+
+def dm_dips_of(noise_params):
+    """Placeholder windows, one per DM dip a (prefix-stripped) noise dict has
+    values for - enough to build the fixed model, whose values come from the
+    dict."""
+    n = sum(1 for key in noise_params if key.startswith("dmexp_") and key.endswith("_t0"))
+    return [(0.0, 1.0)] * n
 
 
 def _build_pta(
@@ -373,6 +418,8 @@ def _build_pta(
     equad_convention="t2",
 
     ecorr_groups=None,
+
+    dm_dips=None,
 ):
     """
     Build a real, single-pulsar ``enterprise`` PTA likelihood: a
@@ -417,6 +464,7 @@ def _build_pta(
         equad_convention=equad_convention,
         ecorr_groups=ecorr_groups,
         ecorr_method=ecorr_method_for(psr),
+        dm_dips=dm_dips,
     )
     pta = signal_base.PTA([model(psr)])
     return psr, pta
@@ -590,6 +638,9 @@ _PROPOSAL_SCALES = (
     ("_log10_ecorr", 0.2),
     ("_gamma", 0.3),
     ("_log10_A", 0.2),
+    ("_log10_Amp", 0.2),
+    ("_t0", 5.0),
+    ("_log10_tau", 0.2),
 )
 
 
@@ -646,6 +697,8 @@ def run_noise_fit(
     min_ess=200.0,
     max_split_shift=0.3,
     white_noise="map",
+
+    dm_dips=None,
 ):
     """
     Run a real single-pulsar noise fit and write the chain plus a summary
@@ -739,6 +792,7 @@ def run_noise_fit(
             equad_convention="tn" if white_noise == "par" else "t2",
             # par: ECORR exactly where the par file has TNECORR, as DR2's model.
             ecorr_groups=ecorr_groups_of(tempo_nest_white_noise(par_file)) if white_noise == "par" else None,
+            dm_dips=dm_dips,
         )
     except Exception as exc:
         report = NoiseFitReport(

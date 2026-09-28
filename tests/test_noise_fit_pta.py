@@ -155,6 +155,28 @@ class BuildPTATests(unittest.TestCase):
         self.assertFalse(any(name.endswith("log10_ecorr") for name in pta.param_names))
         self._assert_finite_likelihood(pta)
 
+    def test_dm_dip_adds_a_deterministic_nu2_exponential_dip(self):
+        psr, pta = _build_pta(
+            self.par_path, [self.tim_path], red_noise_components=5, dm_noise_components=5,
+            dm_dips=[(55200.0, 55400.0)],
+        )
+        prefix = "1748-2021E_dmexp_1_"
+        for name in ("log10_Amp", "t0", "log10_tau"):
+            self.assertIn(prefix + name, pta.param_names)
+        self._assert_finite_likelihood(pta)
+
+        params = {p.name: p.sample() for p in pta.params}
+        params.update({prefix + "log10_Amp": -6.0, prefix + "t0": 55300.0, prefix + "log10_tau": 1.5})
+        delay = pta.get_delay(params)[0]
+        mjd = psr.toas / 86400.0
+        before, after = mjd < 55300.0, mjd >= 55300.0
+        self.assertTrue(np.all(delay[before] == 0))
+        self.assertTrue(np.all(delay[after] < 0))
+        # nu^-2 at fixed epoch-offset: scaled delay depends only on time.
+        scaled = delay[after] * (psr.freqs[after] / 1400.0) ** 2
+        expected = -1e-6 * np.exp(-(psr.toas[after] - 55300.0 * 86400.0) / (10**1.5 * 86400.0))
+        np.testing.assert_allclose(scaled, expected, rtol=1e-9)
+
     def test_use_ecorr_false_omits_ecorr_params(self):
         psr, pta = _build_pta(
             self.par_path, [self.tim_path],

@@ -247,7 +247,7 @@ def _build_joint_pta(
     from enterprise.pulsar import Pulsar
     from enterprise.signals import gp_priors, gp_signals, parameter, selections, signal_base, utils
 
-    from .noise_fit import _build_noise_model, ecorr_groups_of, ecorr_method_for, has_ecorr_epochs
+    from .noise_fit import _build_noise_model, dm_dips_of, ecorr_groups_of, ecorr_method_for, has_ecorr_epochs
 
     # Instantiated exactly once, with an explicit shared name - see the
     # module docstring for why this (rather than calling parameter.Uniform()
@@ -302,6 +302,7 @@ def _build_joint_pta(
             selection_fn=selections.no_selection if legacy else None,
             ecorr_method=ecorr_method_for(psr),
             ecorr_groups=None if legacy else ecorr_groups_of(noise_params),
+            dm_dips=dm_dips_of(noise_params),
             # A noise fit with white noise: par uses TempoNest's EQUAD convention.
             equad_convention="tn" if any(k.endswith("_log10_tnequad") for k in noise_params) else "t2",
         )
