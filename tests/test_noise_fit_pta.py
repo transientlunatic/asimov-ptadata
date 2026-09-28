@@ -69,9 +69,12 @@ def _make_two_backend_fixture(workdir):
     """
     model = pint.models.get_model(pint.config.examplefile("NGC6440E.par"))
 
+    # 430_ASP is sub-banded (two frequencies per observation, like
+    # NANOGrav's data), so it has ECORR epochs; Lwide_PUPPI has one TOA per
+    # observation, so it doesn't.
     toas_a = pint.simulation.make_fake_toas_uniform(
-        55000, 55500, 30, model, freq=1400 * u.MHz, obs="gbt", error=1 * u.us,
-        flags={"fe": "430", "be": "ASP", "f": "430_ASP"},
+        55000, 55500, 30, model, freq=np.array([1400, 1500]) * u.MHz, obs="gbt", error=1 * u.us,
+        multi_freqs_in_epoch=True, flags={"fe": "430", "be": "ASP", "f": "430_ASP"},
     )
     toas_b = pint.simulation.make_fake_toas_uniform(
         55500, 56000, 30, model, freq=800 * u.MHz, obs="gbt", error=1 * u.us,
@@ -119,8 +122,11 @@ class BuildPTATests(unittest.TestCase):
         prefix = "1748-2021E_"
 
         for backend in ("430_ASP", "Lwide_PUPPI"):
-            for suffix in ("efac", "log10_t2equad", "log10_ecorr"):
+            for suffix in ("efac", "log10_t2equad"):
                 self.assertIn(f"{prefix}{backend}_{suffix}", names)
+        # ECORR only where there are multi-TOA epochs.
+        self.assertIn(f"{prefix}430_ASP_log10_ecorr", names)
+        self.assertNotIn(f"{prefix}Lwide_PUPPI_log10_ecorr", names)
 
         self.assertIn(f"{prefix}red_noise_gamma", names)
         self.assertIn(f"{prefix}red_noise_log10_A", names)
@@ -131,6 +137,22 @@ class BuildPTATests(unittest.TestCase):
         # not show up as free PTA parameters at all.
         self.assertFalse(any("linear_timing_model" in name for name in names))
 
+        self._assert_finite_likelihood(pta)
+
+    def test_pulsar_without_ecorr_epochs_gets_no_ecorr(self):
+        # One TOA per observation everywhere: an ECORR signal would have an
+        # empty selection, which enterprise can't evaluate, so it's omitted.
+        model = pint.models.get_model(pint.config.examplefile("NGC6440E.par"))
+        toas = pint.simulation.make_fake_toas_uniform(
+            55000, 56000, 40, model, freq=1400 * u.MHz, obs="gbt", error=1 * u.us,
+            flags={"fe": "L-wide", "be": "PUPPI", "f": "Lwide_PUPPI"},
+        )
+        tim_path = self.workdir / "no-epochs.tim"
+        toas.write_TOA_file(tim_path, format="tempo2")
+
+        _, pta = _build_pta(self.par_path, [tim_path], red_noise_components=5, dm_noise_components=5)
+
+        self.assertFalse(any(name.endswith("log10_ecorr") for name in pta.param_names))
         self._assert_finite_likelihood(pta)
 
     def test_use_ecorr_false_omits_ecorr_params(self):
@@ -150,6 +172,76 @@ class BuildPTATests(unittest.TestCase):
         names = set(pta.param_names)
         self.assertFalse(any("dm_gp" in name for name in names))
         self._assert_finite_likelihood(pta)
+
+
+class RunNoiseFitTests(unittest.TestCase):
+    """Short real end-to-end runs of ``run_noise_fit`` in both white-noise
+    modes (too short to converge - this checks the plumbing, not the
+    statistics)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.workdir = Path(tempfile.mkdtemp(prefix="ptadata-run-noise-fit-test-"))
+        cls.par_path, cls.tim_path = _make_two_backend_fixture(cls.workdir)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.workdir, ignore_errors=True)
+
+    def _run(self, white_noise):
+        from asimov_ptadata.noise_fit import run_noise_fit
+
+        outdir = self.workdir / white_noise
+        report = run_noise_fit(
+            self.par_path, [self.tim_path], outdir, niter=300, burn=100, stage2_niter=300,
+            red_noise_components=5, dm_noise_components=5, seed=1, white_noise=white_noise,
+        )
+        self.assertEqual(report.status, "complete", report.notes)
+        return report, outdir
+
+    def test_map_mode_fixes_white_noise_and_samples_red_dm_only(self):
+        report, outdir = self._run("map")
+        self.assertEqual(report.convergence["white noise"], "map")
+        self.assertNotIn("stage 1 lnlikelihood split_shift", report.convergence)
+        self.assertFalse((outdir / "chain").exists())
+        self.assertTrue((outdir / "chain_stage2" / "chain_1.txt").exists())
+        self.assertEqual(
+            set(report.convergence["parameters"]),
+            {n for n in report.param_names if not n.endswith(("_efac", "_log10_t2equad", "_log10_ecorr"))},
+        )
+        self.assertTrue(any("MAP" in n for n in report.notes))
+
+    def test_par_mode_fixes_white_noise_at_the_par_files_tempo_nest_values(self):
+        import shutil as _shutil
+
+        from asimov_ptadata.noise_fit import run_noise_fit
+
+        par = self.workdir / "with-tn.par"
+        _shutil.copy(self.par_path, par)
+        with open(par, "a") as f:
+            f.write("TNEF -group 430_ASP 1.2\nTNEQ -group 430_ASP -6.5\nTNECORR -group 430_ASP 0.5\n")
+        outdir = self.workdir / "par"
+        report = run_noise_fit(
+            par, [self.tim_path], outdir, niter=300, burn=100, stage2_niter=300,
+            red_noise_components=5, dm_noise_components=5, seed=1, white_noise="par",
+        )
+        self.assertEqual(report.status, "complete", report.notes)
+        values = dict(zip(report.param_names, report.posterior_means))
+        self.assertAlmostEqual(values["1748-2021E_430_ASP_efac"], 1.2)
+        self.assertAlmostEqual(values["1748-2021E_430_ASP_log10_tnequad"], -6.5)
+        self.assertAlmostEqual(values["1748-2021E_430_ASP_log10_ecorr"], np.log10(0.5e-6))
+        # Lwide_PUPPI has no TN values in the par file: MAP for those.
+        self.assertIn("1748-2021E_Lwide_PUPPI_efac", values)
+        self.assertTrue(any("TempoNest" in n and "Lwide_PUPPI" in n for n in report.notes))
+        # ECORR only where the par file has TNECORR - never a MAP fallback.
+        self.assertFalse(any("MAP for" in n and "ecorr" in n for n in report.notes), report.notes)
+
+    def test_sample_mode_runs_both_stages(self):
+        report, outdir = self._run("sample")
+        self.assertEqual(report.convergence["white noise"], "sample")
+        self.assertIn("stage 1 lnlikelihood split_shift", report.convergence)
+        self.assertTrue((outdir / "chain" / "chain_1.txt").exists())
+        self.assertTrue((outdir / "chain_stage2" / "chain_1.txt").exists())
 
 
 if __name__ == "__main__":

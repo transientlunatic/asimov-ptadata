@@ -157,6 +157,7 @@ class NoisePipeline(asimov.pipeline.Pipeline):
                 "optimise start": sampler_meta.get("optimise start", True),
                 "min ess": sampler_meta.get("min ess", 200),
                 "max split shift": sampler_meta.get("max split shift", 0.3),
+                "white noise": sampler_meta.get("white noise", "map"),
             },
         }
         settings_file = os.path.join(self.production.rundir, f"{name}.settings.yml")

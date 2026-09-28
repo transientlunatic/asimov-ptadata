@@ -129,9 +129,13 @@ def run(settings_file):
 @click.option("--optimise-start/--prior-start", default=True, show_default=True)
 @click.option("--min-ess", default=200.0, show_default=True)
 @click.option("--max-split-shift", default=0.3, show_default=True)
+@click.option(
+    "--white-noise", type=click.Choice(["map", "par", "sample"]), default="map", show_default=True,
+    help="Fix white noise at its MAP (map) or the par file's TempoNest values (par), or sample it (sample).",
+)
 def noise_fit(
     par_file, tim_files, outdir, niter, burn, red_noise_components, dm_noise_components, use_ecorr, use_dm_noise,
-    two_stage, stage2_niter, optimise_start, min_ess, max_split_shift,
+    two_stage, stage2_niter, optimise_start, min_ess, max_split_shift, white_noise,
 ):
     """Run a single-pulsar Bayesian noise fit (enterprise + PINT + PTMCMCSampler)."""
     report = noise_fit_.run_noise_fit(
@@ -146,6 +150,7 @@ def noise_fit(
         optimise_start=optimise_start,
         min_ess=min_ess,
         max_split_shift=max_split_shift,
+        white_noise=white_noise,
     )
     click.echo(yaml.safe_dump(dataclasses.asdict(report), sort_keys=False))
     if report.status != "complete":
@@ -178,6 +183,7 @@ def noise_run(settings_file):
             optimise_start=sampler.get("optimise start", True),
             min_ess=sampler.get("min ess", 200),
             max_split_shift=sampler.get("max split shift", 0.3),
+            white_noise=sampler.get("white noise", "map"),
         )
         click.echo(f"noise-run complete for {subject['name']}: status={report.status}")
         if report.status != "complete":
