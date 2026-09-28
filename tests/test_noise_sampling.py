@@ -17,6 +17,13 @@ from types import SimpleNamespace
 
 import numpy as np
 
+try:
+    import enterprise  # noqa: F401
+
+    HAVE_ENTERPRISE = True
+except ImportError:  # pragma: no cover
+    HAVE_ENTERPRISE = False
+
 from asimov_ptadata.noise_fit import (
     ecorr_method_for,
     _initial_point,
@@ -232,6 +239,7 @@ class InitialPointTests(unittest.TestCase):
             self.assertAlmostEqual(x0[idx], target_value, delta=0.1)
 
 
+@unittest.skipUnless(HAVE_ENTERPRISE, "enterprise not installed")
 class EcorrMethodTests(unittest.TestCase):
     """``ecorr_method_for``: fastshermanmorrison fails on a pulsar with no
     multi-TOA epoch at all, so those get enterprise's plain method."""

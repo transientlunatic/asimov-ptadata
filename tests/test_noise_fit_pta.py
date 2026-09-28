@@ -38,6 +38,10 @@ from asimov_ptadata.noise_fit import _build_pta
 
 
 def setUpModule():
+    try:
+        import enterprise  # noqa: F401
+    except ImportError:  # pragma: no cover - the noise extra isn't installed
+        raise unittest.SkipTest("enterprise not installed (pip install asimov-ptadata[noise])")
     # Through PINT's own loader, which is what the PTA uses: it falls back to
     # JPL's a_old_versions/ mirror. astropy's solar_system_ephemeris URL for
     # DE421 now returns 404, which silently skipped this whole module.
