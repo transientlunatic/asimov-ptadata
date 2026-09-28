@@ -176,6 +176,10 @@ jobs:
           status: ready
           sampler:
             niter: 800
+            # Far too short to converge: this tests the plumbing, so let the
+            # convergence gate pass (it's unit-tested separately).
+            min ess: 0
+            max split shift: 1000
             burn: 200
             red noise components: 5
           EOF
@@ -202,6 +206,10 @@ jobs:
           status: ready
           sampler:
             niter: 800
+            # Far too short to converge: this tests the plumbing, so let the
+            # convergence gate pass (it's unit-tested separately).
+            min ess: 0
+            max split shift: 1000
             burn: 200
             red noise components: 5
             gwb components: 5
