@@ -194,11 +194,26 @@ def tempo_nest_white_noise(par_file):
     return values
 
 
-def has_ecorr_epochs(psr):
+def _epochs_in(groups):
+    groups = set(groups)
+
+    def by_backend_with_epochs_in(backend_flags, toas):
+        return {k: v for k, v in by_backend_with_epochs(backend_flags, toas).items() if k in groups}
+
+    return by_backend_with_epochs_in
+
+
+def ecorr_groups_of(noise_params):
+    """Backends a (prefix-stripped) noise dict has an ECORR value for."""
+    return {k[: -len("_log10_ecorr")] for k in noise_params if k.endswith("_log10_ecorr")}
+
+
+def has_ecorr_epochs(psr, groups=None):
     """Whether any backend of ``psr`` has an ECORR epoch. If none does, the
     model must leave ECORR out entirely: ``EcorrKernelNoise`` with an empty
     selection fails (an empty ``np.concatenate``) whichever method it uses."""
-    return bool(by_backend_with_epochs(psr.backend_flags, psr.toas))
+    selected = by_backend_with_epochs(psr.backend_flags, psr.toas)
+    return bool(selected if groups is None else set(selected) & set(groups))
 
 
 def ecorr_method_for(psr):
@@ -228,6 +243,7 @@ def _build_noise_model(
     selection_fn=None,
     ecorr_method="fast-sherman-morrison",
     equad_convention="t2",
+    ecorr_groups=None,
 ):
     """
     Build the per-pulsar signal model shared by every pulsar in both the
@@ -285,6 +301,10 @@ def _build_noise_model(
         predates per-backend noise support (see that module's docstring).
     ecorr_method : str
         enterprise's ``EcorrKernelNoise`` method; see :func:`ecorr_method_for`.
+    ecorr_groups : collection of str, optional
+        Restrict ECORR to these backends (still only those with epochs): the
+        par file's ``TNECORR`` groups for ``white_noise="par"``, or the
+        groups a fixed noise dict has ECORR values for.
     equad_convention : {"t2", "tn"}
         ``"t2"`` (default): EQUAD inside the EFAC scaling (``log10_t2equad``).
         ``"tn"``: TempoNest's, EQUAD added outside it (``log10_tnequad``) -
@@ -299,7 +319,7 @@ def _build_noise_model(
 
     if selection_fn is None:
         selection_fn = selections.by_backend
-        ecorr_selection_fn = by_backend_with_epochs
+        ecorr_selection_fn = by_backend_with_epochs if ecorr_groups is None else _epochs_in(ecorr_groups)
     else:
         ecorr_selection_fn = selection_fn
     selection = selections.Selection(selection_fn)
@@ -351,6 +371,8 @@ def _build_pta(
     use_dm_noise=True,
 
     equad_convention="t2",
+
+    ecorr_groups=None,
 ):
     """
     Build a real, single-pulsar ``enterprise`` PTA likelihood: a
@@ -389,10 +411,11 @@ def _build_pta(
     model = _build_noise_model(
         red_noise_components=red_noise_components,
         dm_noise_components=dm_noise_components,
-        use_ecorr=use_ecorr and has_ecorr_epochs(psr),
+        use_ecorr=use_ecorr and has_ecorr_epochs(psr, ecorr_groups),
         use_dm_noise=use_dm_noise,
         fixed=False,
         equad_convention=equad_convention,
+        ecorr_groups=ecorr_groups,
         ecorr_method=ecorr_method_for(psr),
     )
     pta = signal_base.PTA([model(psr)])
@@ -714,6 +737,8 @@ def run_noise_fit(
             use_ecorr=use_ecorr,
             use_dm_noise=use_dm_noise,
             equad_convention="tn" if white_noise == "par" else "t2",
+            # par: ECORR exactly where the par file has TNECORR, as DR2's model.
+            ecorr_groups=ecorr_groups_of(tempo_nest_white_noise(par_file)) if white_noise == "par" else None,
         )
     except Exception as exc:
         report = NoiseFitReport(

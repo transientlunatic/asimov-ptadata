@@ -229,6 +229,8 @@ class RunNoiseFitTests(unittest.TestCase):
         # Lwide_PUPPI has no TN values in the par file: MAP for those.
         self.assertIn("1748-2021E_Lwide_PUPPI_efac", values)
         self.assertTrue(any("TempoNest" in n and "Lwide_PUPPI" in n for n in report.notes))
+        # ECORR only where the par file has TNECORR - never a MAP fallback.
+        self.assertFalse(any("MAP for" in n and "ecorr" in n for n in report.notes), report.notes)
 
     def test_sample_mode_runs_both_stages(self):
         report, outdir = self._run("sample")
