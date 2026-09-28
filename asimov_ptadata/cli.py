@@ -184,6 +184,7 @@ def noise_run(settings_file):
             min_ess=sampler.get("min ess", 200),
             max_split_shift=sampler.get("max split shift", 0.3),
             white_noise=sampler.get("white noise", "map"),
+            dm_dips=[tuple(w) for w in sampler.get("dm dips", []) or []],
         )
         click.echo(f"noise-run complete for {subject['name']}: status={report.status}")
         if report.status != "complete":
