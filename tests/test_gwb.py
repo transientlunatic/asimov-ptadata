@@ -161,6 +161,8 @@ class GWBPipelineTests(unittest.TestCase):
             ],
             "posterior_means": [1.1, -7.0, -7.2, 3.5, -14.0, 2.1, -13.5],
             "status": noise_status,
+            # NoisePipeline only auto-approves converged fits.
+            "converged": noise_status == "complete",
         }
         (report_dir / "noise_report.yml").write_text(yaml.safe_dump(report))
 

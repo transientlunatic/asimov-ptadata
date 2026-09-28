@@ -152,6 +152,11 @@ class NoisePipeline(asimov.pipeline.Pipeline):
                 "dm noise components": sampler_meta.get("dm noise components", 10),
                 "ecorr": sampler_meta.get("ecorr", True),
                 "dm noise": sampler_meta.get("dm noise", True),
+                "two stage": sampler_meta.get("two stage", True),
+                "stage 2 niter": sampler_meta.get("stage 2 niter", None),
+                "optimise start": sampler_meta.get("optimise start", True),
+                "min ess": sampler_meta.get("min ess", 200),
+                "max split shift": sampler_meta.get("max split shift", 0.3),
             },
         }
         settings_file = os.path.join(self.production.rundir, f"{name}.settings.yml")
@@ -254,6 +259,7 @@ class NoisePipeline(asimov.pipeline.Pipeline):
           exists yet at all.
         """
         statuses = {}
+        converged = {}
         for subject_name in self._subject_names():
             report_path = self._noise_report_path(subject_name)
             if not os.path.exists(report_path):
@@ -261,13 +267,25 @@ class NoisePipeline(asimov.pipeline.Pipeline):
             with open(report_path) as f:
                 report = yaml.safe_load(f)
             statuses[subject_name] = report.get("status", "failed")
+            # Reports from before convergence checking have no verdict: a
+            # human has to look at those too.
+            converged[subject_name] = bool(report.get("converged", False))
 
         if statuses:
             failed = [name for name in self._subject_names() if statuses.get(name) != "complete"]
-            if not failed:
+            unconverged = [name for name in self._subject_names() if name in statuses and not converged[name]]
+            if not failed and unconverged:
+                # Leave the review unset, as the reduce pipeline does for a
+                # needs-review QC report: the downstream fixed-noise searches
+                # would otherwise run on unconverged noise values.
+                self.logger.warning(
+                    "Noise fit completed but did not converge for: "
+                    f"{', '.join(unconverged)} - leaving the review for a human."
+                )
+            elif not failed:
                 self.production.review.add(
                     ReviewMessage(
-                        message="Automated noise fit(s) completed",
+                        message="Automated noise fit(s) completed and converged",
                         production=self.production,
                         status="APPROVED",
                     )

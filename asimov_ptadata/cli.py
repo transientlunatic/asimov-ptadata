@@ -121,8 +121,17 @@ def run(settings_file):
 @click.option("--dm-noise-components", default=10, show_default=True)
 @click.option("--ecorr/--no-ecorr", "use_ecorr", default=True, show_default=True)
 @click.option("--dm-noise/--no-dm-noise", "use_dm_noise", default=True, show_default=True)
+@click.option(
+    "--two-stage/--one-stage", default=True, show_default=True,
+    help="Re-sample red/DM noise with the white noise fixed at its stage-1 posterior means.",
+)
+@click.option("--stage2-niter", default=None, type=int, help="Stage-2 iterations (default: --niter).")
+@click.option("--optimise-start/--prior-start", default=True, show_default=True)
+@click.option("--min-ess", default=200.0, show_default=True)
+@click.option("--max-split-shift", default=0.3, show_default=True)
 def noise_fit(
-    par_file, tim_files, outdir, niter, burn, red_noise_components, dm_noise_components, use_ecorr, use_dm_noise
+    par_file, tim_files, outdir, niter, burn, red_noise_components, dm_noise_components, use_ecorr, use_dm_noise,
+    two_stage, stage2_niter, optimise_start, min_ess, max_split_shift,
 ):
     """Run a single-pulsar Bayesian noise fit (enterprise + PINT + PTMCMCSampler)."""
     report = noise_fit_.run_noise_fit(
@@ -132,6 +141,11 @@ def noise_fit(
         dm_noise_components=dm_noise_components,
         use_ecorr=use_ecorr,
         use_dm_noise=use_dm_noise,
+        two_stage=two_stage,
+        stage2_niter=stage2_niter,
+        optimise_start=optimise_start,
+        min_ess=min_ess,
+        max_split_shift=max_split_shift,
     )
     click.echo(yaml.safe_dump(dataclasses.asdict(report), sort_keys=False))
     if report.status != "complete":
@@ -159,6 +173,11 @@ def noise_run(settings_file):
             dm_noise_components=sampler.get("dm noise components", 10),
             use_ecorr=sampler.get("ecorr", True),
             use_dm_noise=sampler.get("dm noise", True),
+            two_stage=sampler.get("two stage", True),
+            stage2_niter=sampler.get("stage 2 niter"),
+            optimise_start=sampler.get("optimise start", True),
+            min_ess=sampler.get("min ess", 200),
+            max_split_shift=sampler.get("max split shift", 0.3),
         )
         click.echo(f"noise-run complete for {subject['name']}: status={report.status}")
         if report.status != "complete":

@@ -139,6 +139,11 @@ class NoiseFitReport:
     sampler: str
     status: str
     notes: list
+    # Filled by the two-stage fit (see run_noise_fit): per-parameter
+    # convergence diagnostics for the red/DM noise parameters the
+    # downstream fixed-noise searches depend on, and the overall verdict.
+    convergence: dict | None = None
+    converged: bool | None = None
 
     def save(self, path):
         with open(path, "w") as f:
@@ -302,6 +307,167 @@ def _build_pta(
     return psr, pta
 
 
+# ---------------------------------------------------------------------------
+# Sampling helpers: parameter groups, a data-driven starting point, and
+# convergence diagnostics.
+# ---------------------------------------------------------------------------
+
+_WHITE_SUFFIXES = ("_efac", "_log10_t2equad", "_log10_ecorr")
+
+
+def _is_white(name):
+    return name.endswith(_WHITE_SUFFIXES)
+
+
+def _backend_groups(names):
+    """Indices of each backend's white-noise parameters, one list per backend."""
+    backends = {}
+    for i, name in enumerate(names):
+        for suffix in _WHITE_SUFFIXES:
+            if name.endswith(suffix):
+                backends.setdefault(name[: -len(suffix)], []).append(i)
+    return list(backends.values())
+
+
+def _param_groups(names):
+    """PTMCMC jump groups: every parameter; each backend's white-noise
+    parameters; the red-noise pair; the DM-noise pair; red+DM together; and
+    all white-noise parameters.
+
+    Without groups, every proposal moves all parameters at once - 121 of them
+    for J1713+0747 in IPTA DR2 - and the chain can sit for 10^5 iterations
+    far from the likelihood peak (it did: its red/DM noise stayed ~4 dex too
+    low, dlnL ~ -400). Per-group jumps let the few red/DM hyperparameters
+    move on their own.
+    """
+    groups = [list(range(len(names)))]
+    backends = _backend_groups(names)
+    groups += backends
+    red = [i for i, n in enumerate(names) if "red_noise" in n]
+    dm = [i for i, n in enumerate(names) if "dm_gp" in n]
+    groups += [g for g in (red, dm, red + dm) if g]
+    white = sorted(i for idx in backends for i in idx)
+    if white and len(white) < len(names):
+        groups.append(white)
+    return groups
+
+
+def _bounds(param):
+    defaults = getattr(getattr(param, "prior", None), "_defaults", {}) or {}
+    if "pmin" in defaults and "pmax" in defaults:
+        return float(defaults["pmin"]), float(defaults["pmax"])
+    draws = np.array([param.sample() for _ in range(200)], dtype=float)
+    return float(draws.min()), float(draws.max())
+
+
+def _initial_point(pta, x_prior, rounds=2, maxfev=400, maxfev_backend=60):
+    """A starting point near the likelihood peak.
+
+    White noise starts at nominal values (EFAC 1, EQUAD/ECORR near the
+    bottom of their priors), then ``rounds`` of coordinate ascent alternate
+    between the red/DM hyperparameters (one bounded Powell maximisation) and
+    each backend's white-noise parameters in turn, followed by a final
+    red/DM pass. Both halves matter: starting the chain from a prior draw
+    left J1713+0747's red/DM noise ~4 dex too low (dlnL ~ -400), while
+    optimising only red/DM with white noise at its floor let a flat
+    (gamma ~ 0.3) "red" process stand in for the missing white noise.
+    """
+    from scipy.optimize import minimize
+
+    names = pta.param_names
+    x = np.array(x_prior, dtype=float)
+    for i, (name, param) in enumerate(zip(names, pta.params)):
+        lo, hi = _bounds(param)
+        if name.endswith("_efac"):
+            x[i] = min(max(1.0, lo), hi)
+        elif _is_white(name):
+            x[i] = lo + 0.05 * (hi - lo)
+        elif name.endswith("log10_A"):
+            x[i] = lo + 0.6 * (hi - lo)
+        else:
+            x[i] = 0.5 * (lo + hi)
+
+    def maximise(idx, fev):
+        bounds = [_bounds(pta.params[i]) for i in idx]
+
+        def neg_lnpost(sub):
+            y = x.copy()
+            y[idx] = sub
+            lp = pta.get_lnprior(y)
+            return np.inf if not np.isfinite(lp) else -(pta.get_lnlikelihood(y) + lp)
+
+        result = minimize(neg_lnpost, x[idx], method="Powell", bounds=bounds, options={"maxfev": fev, "xtol": 1e-2})
+        if np.isfinite(result.fun):
+            x[idx] = result.x
+
+    red_dm = [i for i, n in enumerate(names) if not _is_white(n)]
+    backends = _backend_groups(names)
+    for _ in range(rounds):
+        if red_dm:
+            maximise(red_dm, maxfev)
+        for group in backends:
+            maximise(group, maxfev_backend)
+    if red_dm:
+        maximise(red_dm, maxfev)
+    return x
+
+
+def effective_sample_size(x):
+    """Effective sample size of a 1-D chain from its autocorrelation,
+    summed until it first drops below 0.05."""
+    x = np.asarray(x, dtype=float)
+    n = len(x)
+    # ptp, not var: a flat chain of e.g. 3.14 has var ~1e-30, not 0.
+    if n < 4 or np.ptp(x) == 0:
+        return float(n)
+    y = x - x.mean()
+    f = np.fft.rfft(y, 2 * n)
+    acf = np.fft.irfft(f * np.conj(f))[:n] / (np.var(x) * n)
+    tau = 1.0
+    for k in range(1, n):
+        if acf[k] < 0.05:
+            break
+        tau += 2.0 * acf[k]
+    return float(n / tau)
+
+
+def split_shift(x):
+    """|mean(first half) - mean(second half)| in units of the chain's SD."""
+    x = np.asarray(x, dtype=float)
+    sd = np.std(x)
+    if len(x) < 4 or np.ptp(x) == 0:
+        return 0.0
+    h = len(x) // 2
+    return float(abs(x[:h].mean() - x[h:].mean()) / sd)
+
+
+def convergence_summary(chain, names, min_ess=200.0, max_split_shift=0.3):
+    """Per-parameter ESS and split-half shift, and whether every parameter
+    passes both thresholds."""
+    per_param = {}
+    ok = True
+    for i, name in enumerate(names):
+        ess = effective_sample_size(chain[:, i])
+        shift = split_shift(chain[:, i])
+        per_param[name] = {"ess": round(ess, 1), "split_shift": round(shift, 3)}
+        ok = ok and ess >= min_ess and shift <= max_split_shift
+    return {"min_ess": min_ess, "max_split_shift": max_split_shift, "parameters": per_param}, bool(ok)
+
+
+def _run_ptmcmc(logl, logp, x0, groups, outdir, niter, burn):
+    from PTMCMCSampler.PTMCMCSampler import PTSampler
+
+    ndim = len(x0)
+    cov = np.diag(np.ones(ndim) * 0.1**2)
+    sampler = PTSampler(ndim, logl, logp, cov, groups=groups, outDir=str(outdir), verbose=False)
+    sampler.sample(
+        x0, niter, burn=burn, thin=1, isave=max(burn, 1), covUpdate=burn,
+        SCAMweight=30, AMweight=15, DEweight=50,
+    )
+    chain = np.loadtxt(Path(outdir) / "chain_1.txt")
+    return chain.reshape(1, -1) if chain.ndim == 1 else chain
+
+
 def run_noise_fit(
     par_file,
     tim_files,
@@ -314,10 +480,37 @@ def run_noise_fit(
     use_ecorr=True,
     use_dm_noise=True,
     seed=None,
+    two_stage=True,
+    stage2_niter=None,
+    optimise_start=True,
+    min_ess=200.0,
+    max_split_shift=0.3,
 ):
     """
     Run a real single-pulsar noise fit and write the chain plus a summary
     report to ``outdir``.
+
+    With ``two_stage`` (the default) this is:
+
+    1. **All parameters**, from a starting point near the likelihood peak for
+       the red/DM noise (``optimise_start``, see :func:`_initial_point`),
+       with per-group jumps (:func:`_param_groups`). White-noise posterior
+       means are taken from here.
+    2. **Red- and DM-noise hyperparameters only**, with the white noise
+       fixed at those means, for ``stage2_niter`` iterations (default
+       ``niter``). Four parameters mix far better than the ~40-120 of the
+       joint model, and these are the values the fixed-noise GWB and jerk
+       searches depend on most.
+
+    ``convergence``/``converged`` in the report come from the chain that
+    determined the red/DM values (stage 2, or stage 1 if ``two_stage`` is
+    off): every one of those parameters must reach an effective sample size
+    of at least ``min_ess`` and a split-half mean shift of at most
+    ``max_split_shift`` posterior SDs. Stage 1's log-likelihood must also be
+    stationary (split-half shift at most ``max_split_shift``): a stage 1
+    still climbing towards the peak leaves white-noise values that stage 2
+    would otherwise converge around (J1713+0747 did exactly that). The
+    ``ptadata-noise`` Asimov pipeline only auto-approves converged fits.
 
     Parameters
     ----------
@@ -345,6 +538,8 @@ def run_noise_fit(
         Whether to include the chromatic DM-noise GP (default ``True``).
     seed : int, optional
         Seed for the initial-sample RNG, for reproducibility.
+    two_stage, stage2_niter, optimise_start, min_ess, max_split_shift
+        See above.
 
     Returns
     -------
@@ -403,37 +598,66 @@ def run_noise_fit(
         report.save(outdir / "noise_report.yml")
         return report
 
-    from PTMCMCSampler.PTMCMCSampler import PTSampler
-
     rng = np.random.default_rng(seed)
     x0 = np.hstack([p.sample() for p in pta.params]) if seed is None else np.hstack(
         [_sample_with_rng(p, rng) for p in pta.params]
     )
+    names = list(pta.param_names)
     ndim = len(x0)
-    cov = np.diag(np.ones(ndim) * 0.1**2)
+    red_dm = [i for i, n in enumerate(names) if not _is_white(n)]
 
-    chain_dir = outdir / "chain"
     try:
-        sampler = PTSampler(ndim, pta.get_lnlikelihood, pta.get_lnprior, cov, outDir=str(chain_dir))
-        sampler.sample(
-            x0,
-            niter,
-            burn=burn,
-            thin=1,
-            isave=max(burn, 1),
-            covUpdate=cov_update,
-            SCAMweight=30,
-            AMweight=15,
-            DEweight=50,
+        if optimise_start:
+            x0 = _initial_point(pta, x0)
+            notes.append(
+                "stage 1 started from optimised red/DM noise: "
+                + ", ".join(f"{names[i].split('_', 1)[1]}={x0[i]:.2f}" for i in red_dm)
+            )
+        chain1 = _run_ptmcmc(
+            pta.get_lnlikelihood, pta.get_lnprior, x0, _param_groups(names), outdir / "chain", niter, burn
         )
-        chain = np.loadtxt(chain_dir / "chain_1.txt")
+        post1 = chain1[burn:, :ndim] if chain1.shape[0] > burn else chain1[:, :ndim]
+        means = post1.mean(axis=0)
+        # Stage 1 must have stopped climbing: a chain still heading for the
+        # peak gives white-noise means stage 2 would then converge around.
+        lnl1 = chain1[burn:, ndim + 1] if chain1.shape[0] > burn else chain1[:, ndim + 1]
+        stage1_lnl_shift = split_shift(lnl1)
+        decisive, decisive_names, decisive_chain = post1[:, red_dm], [names[i] for i in red_dm], chain1
+
+        if two_stage and red_dm and len(red_dm) < ndim:
+            n2 = int(stage2_niter or niter)
+            burn2 = min(burn, max(n2 // 10, 1))
+            fixed = means.copy()
+
+            def full(sub):
+                y = fixed.copy()
+                y[red_dm] = sub
+                return y
+
+            k = len(red_dm)
+            groups2 = [list(range(k))]
+            groups2 += [g for g in (
+                [j for j, i in enumerate(red_dm) if "red_noise" in names[i]],
+                [j for j, i in enumerate(red_dm) if "dm_gp" in names[i]],
+            ) if g and len(g) < k]
+            chain2 = _run_ptmcmc(
+                lambda sub: pta.get_lnlikelihood(full(sub)),
+                lambda sub: pta.get_lnprior(full(sub)),
+                means[red_dm], groups2, outdir / "chain_stage2", n2, burn2,
+            )
+            post2 = chain2[burn2:, :k] if chain2.shape[0] > burn2 else chain2[:, :k]
+            means[red_dm] = post2.mean(axis=0)
+            decisive, decisive_chain = post2, chain2[:, :k]
+            notes.append(f"stage 2: red/DM noise re-sampled for {n2} iterations with white noise fixed")
+        else:
+            decisive_chain = chain1[:, :ndim]
     except Exception as exc:
         # A report has to land here regardless of outcome: the Asimov
         # pipeline's detect_completion() just checks for this file's
         # existence, so a bare exception here (an unstable proposal, a
-        # malformed/truncated chain file, ...) would otherwise leave the
-        # job polling forever instead of surfacing a visible failure -
-        # same reasoning as the _build_pta failure path above.
+        # malformed/truncated chain file, a failed optimisation, ...) would
+        # otherwise leave the job polling forever instead of surfacing a
+        # visible failure - same reasoning as the _build_pta failure path.
         report = NoiseFitReport(
             pulsar=pulsar_name,
             ntoas=0,
@@ -443,33 +667,43 @@ def run_noise_fit(
             acceptance_fraction=None,
             sampler="PTMCMCSampler",
             status="failed",
-            notes=[f"sampling failed: {exc}"],
+            notes=notes + [f"sampling failed: {exc}"],
         )
         report.save(outdir / "noise_report.yml")
         return report
 
-    if chain.ndim == 1:
-        chain = chain.reshape(1, -1)
-
-    post_burn = chain[burn:, :ndim] if chain.shape[0] > burn else chain[:, :ndim]
-    posterior_means = np.mean(post_burn, axis=0).tolist() if len(post_burn) else []
-
-    if chain.shape[0] > 1:
-        moved = np.any(np.diff(chain[:, :ndim], axis=0) != 0, axis=1)
+    posterior_means = means.tolist()
+    if decisive_chain.shape[0] > 1:
+        moved = np.any(np.diff(decisive_chain, axis=0) != 0, axis=1)
         acceptance_fraction = float(np.mean(moved))
     else:
         acceptance_fraction = None
+    convergence, converged = convergence_summary(decisive, decisive_names, min_ess, max_split_shift)
+    if not converged:
+        notes.append(
+            f"not converged: some red/DM noise parameter has ESS < {min_ess} or a split-half shift "
+            f"> {max_split_shift} SD"
+        )
+    convergence["stage 1 lnlikelihood split_shift"] = round(stage1_lnl_shift, 3)
+    if stage1_lnl_shift > max_split_shift:
+        converged = False
+        notes.append(
+            f"stage 1 not stationary: its log-likelihood shifted by {stage1_lnl_shift:.2f} SD between halves "
+            "(more burn-in or iterations needed)"
+        )
 
     report = NoiseFitReport(
         pulsar=pulsar_name,
         ntoas=int(len(psr.toas)),
         param_names=list(pta.param_names),
         posterior_means=posterior_means,
-        n_samples=int(chain.shape[0]),
+        n_samples=int(decisive_chain.shape[0]),
         acceptance_fraction=acceptance_fraction,
         sampler="PTMCMCSampler",
         status="complete",
         notes=notes,
+        convergence=convergence,
+        converged=converged,
     )
     report.save(outdir / "noise_report.yml")
     return report

@@ -56,6 +56,9 @@ noise = [
     "asimov>=0.7",
     "enterprise-pulsar",
     "ptmcmcsampler",
+    # enterprise's fast ECORR likelihood: ~1.6x faster for J1713+0747
+    # (84 vs 132 ms per evaluation); enterprise falls back without it.
+    "fastshermanmorrison-pulsar",
 ]
 docs = [
     "sphinx",
