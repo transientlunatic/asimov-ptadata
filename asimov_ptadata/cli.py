@@ -184,7 +184,15 @@ def noise_run(settings_file):
 @click.option("--red-noise-components", default=10, show_default=True)
 @click.option("--dm-noise-components", default=10, show_default=True)
 @click.option("--gwb-components", default=10, show_default=True)
-def gwb_fit(pulsars_file, outdir, niter, burn, red_noise_components, dm_noise_components, gwb_components):
+@click.option(
+    "--gwb-gamma", default=13 / 3, show_default=True, type=float,
+    help="Fixed common-process spectral index (13/3 for a GW-driven SMBHB background).",
+)
+@click.option("--sample-gwb-gamma", is_flag=True, help="Sample the spectral index instead of fixing it.")
+def gwb_fit(
+    pulsars_file, outdir, niter, burn, red_noise_components, dm_noise_components, gwb_components, gwb_gamma,
+    sample_gwb_gamma,
+):
     """Run a real, joint array-wide GWB search (fixed noise, enterprise + PINT + PTMCMCSampler)."""
     with open(pulsars_file) as f:
         pulsars = yaml.safe_load(f)
@@ -194,6 +202,7 @@ def gwb_fit(pulsars_file, outdir, niter, burn, red_noise_components, dm_noise_co
         red_noise_components=red_noise_components,
         dm_noise_components=dm_noise_components,
         gwb_components=gwb_components,
+        gwb_gamma=None if sample_gwb_gamma else gwb_gamma,
     )
     click.echo(yaml.safe_dump(dataclasses.asdict(report), sort_keys=False))
     if report.status != "complete":
@@ -218,6 +227,7 @@ def gwb_run(settings_file):
         red_noise_components=sampler.get("red noise components", 10),
         dm_noise_components=sampler.get("dm noise components", 10),
         gwb_components=sampler.get("gwb components", 10),
+        gwb_gamma=sampler.get("gwb gamma"),
     )
     click.echo(f"gwb-run complete: status={report.status}")
     if report.status != "complete":

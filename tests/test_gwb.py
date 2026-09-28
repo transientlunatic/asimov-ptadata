@@ -302,6 +302,8 @@ class GWBPipelineTests(unittest.TestCase):
         self.assertEqual({p["name"] for p in settings["pulsars"]}, set(self.pulsar_names))
         self.assertIn("niter", settings["sampler"])
         self.assertIn("gwb components", settings["sampler"])
+        # Fixed at 13/3 unless the analysis says otherwise.
+        self.assertAlmostEqual(settings["sampler"]["gwb gamma"], 13 / 3)
 
     def test_build_dag_raises_when_a_subject_dependency_missing(self):
         self._make_reduce_production("1748-2021E")
