@@ -87,6 +87,10 @@ def normalise_tim_line(line):
     the ``-addsat`` offset (seconds) folded into ``-to``, or None if the line
     had none. See :func:`normalise_tim_files` for the rules applied.
     """
+    if line.rstrip("\r\n") == "C":
+        # A bare "C": a comment to tempo2, but PINT only knows "C " (with a
+        # space) and tries to parse it as a TOA (IndexError).
+        return "#" + line, False, [], None
     if line.startswith("C") and len(line) > 1 and not line[1].isspace() and not line.startswith("CC "):
         return "C " + line, True, [], None
 

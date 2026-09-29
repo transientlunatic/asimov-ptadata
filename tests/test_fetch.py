@@ -250,3 +250,11 @@ def test_pint_applies_the_converted_addsat_like_tempo2(tmp_path):
 def test_addsat_corrections_are_noted():
     notes = normalisation_notes({"commented TOAs": 0, "valueless flags dropped": 0, "addsat corrections": 2})
     assert notes == ["2 -addsat arrival-time correction(s) were converted to -to time offsets while staging"]
+
+
+def test_bare_c_line_becomes_a_pint_comment():
+    from pint.toa import _toa_format
+
+    new, commented, dropped, addsat = normalise_tim_line("C\n")
+    assert new == "#C\n" and not commented and dropped == [] and addsat is None
+    assert _toa_format(new, fmt="Tempo2") == "Comment"
