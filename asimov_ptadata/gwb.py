@@ -220,6 +220,10 @@ class GWBPipeline(asimov.pipeline.Pipeline):
                 "gwb components": sampler_meta.get("gwb components", 10),
                 # 13/3 (a GW-driven SMBHB background) unless set; null samples it.
                 "gwb gamma": sampler_meta.get("gwb gamma", 13 / 3),
+                # Sample each pulsar's red/DM noise jointly (white noise and
+                # DM dips stay fixed); hd or curn for the common process.
+                "vary pulsar noise": sampler_meta.get("vary pulsar noise", False),
+                "orf": sampler_meta.get("orf", "hd"),
             },
         }
         settings_file = os.path.join(self.production.rundir, f"{name}.settings.yml")

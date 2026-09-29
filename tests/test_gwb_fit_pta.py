@@ -108,6 +108,29 @@ class BuildJointPTATests(unittest.TestCase):
         self.assertEqual(pta.param_names, ["gwb_log10_A"])
         self._assert_finite_likelihood(pta)
 
+    def _noise(self):
+        return {
+            "430_ASP_efac": 1.1, "430_ASP_log10_t2equad": -7.0,
+            "Lwide_PUPPI_efac": 0.95, "Lwide_PUPPI_log10_t2equad": -7.3,
+            "red_noise_gamma": 3.5, "red_noise_log10_A": -14.0,
+            "dm_gp_gamma": 2.1, "dm_gp_log10_A": -13.5,
+        }
+
+    def test_vary_pulsar_noise_samples_red_dm_with_the_common_process(self):
+        for orf in ("hd", "curn"):
+            pulsars = [{"name": "1748-2021E", "par": self.par_path, "tim": [self.tim_path], "noise_params": self._noise()}]
+            _, pta = _build_joint_pta(
+                pulsars, red_noise_components=5, dm_noise_components=5, gwb_components=5,
+                gwb_gamma=13 / 3, vary_pulsar_noise=True, orf=orf,
+            )
+            self.assertEqual(sorted(pta.param_names), sorted([
+                "gwb_log10_A", "1748-2021E_red_noise_gamma", "1748-2021E_red_noise_log10_A",
+                "1748-2021E_dm_gp_gamma", "1748-2021E_dm_gp_log10_A",
+            ]), orf)
+            # Sampling starts at the noise fit's values.
+            self.assertEqual(pta.start_values["1748-2021E_red_noise_log10_A"], -14.0)
+            self._assert_finite_likelihood(pta)
+
     def test_legacy_fixed_noise_dict_still_builds_a_working_pta(self):
         # The old, pre-per-backend FIXED_NOISE_PARAMS shape (no backend
         # suffix, no ECORR, no DM noise) - confirms the backwards

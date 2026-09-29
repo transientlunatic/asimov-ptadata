@@ -254,6 +254,8 @@ def gwb_run(settings_file):
         dm_noise_components=sampler.get("dm noise components", 10),
         gwb_components=sampler.get("gwb components", 10),
         gwb_gamma=sampler.get("gwb gamma"),
+        vary_pulsar_noise=sampler.get("vary pulsar noise", False),
+        orf=sampler.get("orf", "hd"),
     )
     click.echo(f"gwb-run complete: status={report.status}")
     if report.status != "complete":
