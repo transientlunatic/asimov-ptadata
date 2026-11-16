@@ -1,0 +1,89 @@
+name: Publish to PyPI
+
+# Triggered by pushing a version tag (e.g. `git tag v0.1.0 && git push origin v0.1.0`).
+# The package version is derived from the tag by setuptools_scm, so there is
+# no version number to edit in the repository.
+#
+# One-off setup needed before the first release:
+#   1. On PyPI, add a "trusted publisher" for the asimov-ptadata project
+#      (owner: transientlunatic, repository: asimov-ptadata,
+#       workflow: publish.yml, environment: pypi).
+#   2. In the GitHub repository settings, create an environment named "pypi"
+#      (optionally with required reviewers, as a manual gate).
+# No API token is stored: publishing uses OIDC trusted publishing.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distribution packages
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # setuptools_scm needs the full tag history to set the version
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build twine
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Check package metadata
+        run: twine check dist/*
+
+      - name: Store distribution packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/asimov-ptadata
+    permissions:
+      id-token: write  # Required for OIDC trusted publishing
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: Create GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required to create the release and upload assets
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Create release with generated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --generate-notes
