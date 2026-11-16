@@ -59,7 +59,7 @@ jobs:
           # installs asimov-ptadata itself - including its base deps
           # (pint-pulsar et al.) - and registers the "ptadata" entry in
           # asimov's "asimov.pipelines" group.
-          extra-packages: "asimov>=0.7 htcondor==25.13.2"
+          extra-packages: "asimov~=0.7.1 htcondor==25.13.2"
 
       - name: Set up git
         run: |

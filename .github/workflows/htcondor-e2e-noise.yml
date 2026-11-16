@@ -90,7 +90,7 @@ jobs:
           # (see asimov_ptadata/noise_fit.py), avoiding its
           # healpy/scikit-learn dependency chain for a model that doesn't
           # need it.
-          extra-packages: "asimov>=0.7 htcondor==25.13.2 enterprise-pulsar ptmcmcsampler"
+          extra-packages: "asimov~=0.7.1 htcondor==25.13.2 enterprise-pulsar ptmcmcsampler"
 
       - name: Set up git
         run: |
