@@ -86,7 +86,7 @@ jobs:
           # ptadata-noise does, no extra packages beyond that (see
           # pyproject.toml: gp_signals/utils are already part of
           # enterprise-pulsar).
-          extra-packages: "asimov>=0.7 htcondor==25.13.2 enterprise-pulsar ptmcmcsampler"
+          extra-packages: "asimov~=0.7.1 htcondor==25.13.2 enterprise-pulsar ptmcmcsampler"
 
       - name: Set up git
         run: |

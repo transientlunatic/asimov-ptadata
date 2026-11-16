@@ -40,7 +40,7 @@ dependencies = [
 
 [project.optional-dependencies]
 asimov = [
-    "asimov>=0.7",
+    "asimov>=0.7,<0.8",
 ]
 noise = [
     # Needed alongside (not instead of) the "asimov" extra to actually run
@@ -53,8 +53,12 @@ noise = [
     # gp_signals.FourierBasisCommonGP + utils.hd_orf, already part of
     # enterprise-pulsar), which avoids pulling in enterprise_extensions'
     # healpy/scikit-learn dependency chain for models that don't need it.
-    "asimov>=0.7",
+    "asimov>=0.7,<0.8",
     "enterprise-pulsar",
+    # enterprise.signals.signal_base does `import six` but enterprise-pulsar
+    # does not declare it; it is only present by accident on some Python
+    # versions (CI failed with ModuleNotFoundError on 3.11/3.12).
+    "six",
     "ptmcmcsampler",
     # enterprise's fast ECORR likelihood: ~1.6x faster for J1713+0747
     # (84 vs 132 ms per evaluation); enterprise falls back without it.
